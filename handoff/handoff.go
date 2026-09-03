@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/example/agent-sdk/agent"
-	"github.com/example/agent-sdk/tool"
+	"github.com/jiangfufa233/openai-agent-sdk-go/agent"
+	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
 )
 
 type handoffArgs struct {

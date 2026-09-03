@@ -10,9 +10,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/example/agent-sdk/model"
-	"github.com/example/agent-sdk/tool"
-	"github.com/example/agent-sdk/tracing"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
+	"github.com/jiangfufa233/openai-agent-sdk-go/tracing"
 )
 
 const (

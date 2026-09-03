@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/example/agent-sdk/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
 )
 
 func TestNewStreamFromResponse(t *testing.T) {

@@ -18,9 +18,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/example/agent-sdk/agent"
-	"github.com/example/agent-sdk/model"
-	"github.com/example/agent-sdk/model/openai"
+	"github.com/jiangfufa233/openai-agent-sdk-go/agent"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model/openai"
 )
 
 // llmConfig holds the resolved endpoint settings for the chat model.

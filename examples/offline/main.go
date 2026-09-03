@@ -13,12 +13,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/example/agent-sdk/agent"
-	"github.com/example/agent-sdk/handoff"
-	"github.com/example/agent-sdk/model"
-	"github.com/example/agent-sdk/skill"
-	"github.com/example/agent-sdk/testutil"
-	"github.com/example/agent-sdk/tool"
+	"github.com/jiangfufa233/openai-agent-sdk-go/agent"
+	"github.com/jiangfufa233/openai-agent-sdk-go/handoff"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/skill"
+	"github.com/jiangfufa233/openai-agent-sdk-go/testutil"
+	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
 )
 
 type weatherArgs struct {

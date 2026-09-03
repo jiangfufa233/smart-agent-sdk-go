@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/example/agent-sdk/model"
-	"github.com/example/agent-sdk/model/sse"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model/sse"
 )
 
 // streamRequest wraps the shared request shape with the streaming flags.

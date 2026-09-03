@@ -6,8 +6,8 @@
 
 ```go
 import (
-    "github.com/example/agent-sdk/agent"
-    "github.com/example/agent-sdk/model/openai"
+    "github.com/jiangfufa233/openai-agent-sdk-go/agent"
+    "github.com/jiangfufa233/openai-agent-sdk-go/model/openai"
 )
 
 m := openai.New(openai.Config{
@@ -38,7 +38,7 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
-Runnable examples live in `examples/`; API reference will be available on pkg.go.dev once the repository path is finalized.
+Runnable examples live in `examples/`; API reference: [pkg.go.dev/github.com/jiangfufa233/openai-agent-sdk-go](https://pkg.go.dev/github.com/jiangfufa233/openai-agent-sdk-go).
 
 ---
 
@@ -46,7 +46,7 @@ Runnable examples live in `examples/`; API reference will be available on pkg.go
 
 - **核心零依赖**：`model`/`tool`/`agent` 仅使用 Go 标准库；测试使用 `go.uber.org/goleak`。
 - **Go 版本要求**：`go 1.24`+（见 `go.mod`）。
-- **模块路径**：`github.com/example/agent-sdk`（待改为实际仓库地址）。
+- **模块路径**：`github.com/jiangfufa233/openai-agent-sdk-go`。
 
 ## 目录结构
 

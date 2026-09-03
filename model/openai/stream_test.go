@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/agent-sdk/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
 )
 
 // sseServer returns a test server that streams the given raw SSE text with

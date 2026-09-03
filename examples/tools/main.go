@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/example/agent-sdk/agent"
-	"github.com/example/agent-sdk/model/openai"
-	"github.com/example/agent-sdk/tool"
+	"github.com/jiangfufa233/openai-agent-sdk-go/agent"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model/openai"
+	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
 )
 
 type weatherArgs struct {

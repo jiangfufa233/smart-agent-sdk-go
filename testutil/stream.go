@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/agent-sdk/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
 )
 
 // StreamStep scripts one streaming model call.

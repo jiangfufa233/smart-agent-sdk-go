@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/agent-sdk/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
 )
 
 func TestScriptedStreamChatMaterializesDeltas(t *testing.T) {

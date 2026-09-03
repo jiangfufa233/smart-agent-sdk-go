@@ -3,8 +3,8 @@
 package agent
 
 import (
-	"github.com/example/agent-sdk/model"
-	"github.com/example/agent-sdk/tool"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
 )
 
 // Agent is a configurable unit that answers instructions using a model and

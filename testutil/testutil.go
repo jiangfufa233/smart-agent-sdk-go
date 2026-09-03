@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/agent-sdk/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
 )
 
 // ErrScriptExhausted is returned when Chat is called more times than the

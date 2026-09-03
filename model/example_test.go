@@ -3,8 +3,8 @@ package model_test
 import (
 	"time"
 
-	"github.com/example/agent-sdk/model"
-	"github.com/example/agent-sdk/model/openai"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model/openai"
 )
 
 // This compile-only example shows the recommended production composition:

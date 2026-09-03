@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/example/agent-sdk/agent"
-	"github.com/example/agent-sdk/model"
+	"github.com/jiangfufa233/openai-agent-sdk-go/agent"
+	"github.com/jiangfufa233/openai-agent-sdk-go/model"
 )
 
 // This example runs a minimal agent against a scripted in-process model.

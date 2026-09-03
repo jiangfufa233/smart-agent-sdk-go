@@ -1,4 +1,4 @@
-module github.com/example/agent-sdk
+module github.com/jiangfufa233/openai-agent-sdk-go
 
 go 1.24
 
