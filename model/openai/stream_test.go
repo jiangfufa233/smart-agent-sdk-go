@@ -23,7 +23,7 @@ func sseServer(t *testing.T, chunks ...string) *httptest.Server {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 		for _, c := range chunks {
-			fmt.Fprint(w, c)
+			_, _ = fmt.Fprint(w, c)
 			flusher.Flush()
 		}
 	}))
@@ -44,7 +44,7 @@ func orNull(s string) string {
 
 func drainStream(t *testing.T, sr model.StreamReader) []model.StreamEvent {
 	t.Helper()
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	var evs []model.StreamEvent
 	for sr.Next() {
 		evs = append(evs, sr.Event())
@@ -119,7 +119,7 @@ func TestChatStreamSendsStreamOptions(t *testing.T) {
 			t.Errorf("bad body: %v", err)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer ts.Close()
 	c := New(Config{BaseURL: ts.URL, DefaultModel: "gpt-test"})
@@ -141,7 +141,7 @@ func TestChatStreamDisableStreamUsage(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		seen = map[string]any{}
 		_ = json.Unmarshal(body, &seen)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer ts.Close()
 	c := New(Config{BaseURL: ts.URL, DefaultModel: "gpt-test", DisableStreamUsage: true})
@@ -212,7 +212,7 @@ func TestChatStreamTruncatedIsProtocolError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	n := 0
 	for sr.Next() {
 		n++
@@ -252,7 +252,7 @@ func TestChatStreamBadChunkJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	for sr.Next() {
 	}
 	var me *model.ModelError
@@ -264,7 +264,7 @@ func TestChatStreamBadChunkJSON(t *testing.T) {
 func TestChatStreamHTTPError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
 	}))
 	defer ts.Close()
 	c := New(Config{BaseURL: ts.URL, DefaultModel: "gpt-test"})
@@ -282,7 +282,7 @@ func TestChatStreamContextCanceledMidStream(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
-		fmt.Fprint(w, chunkJSON("cmpl-5", `{"content":"first"}`, ""))
+		_, _ = fmt.Fprint(w, chunkJSON("cmpl-5", `{"content":"first"}`, ""))
 		flusher.Flush()
 		select {
 		case <-r.Context().Done():
@@ -297,7 +297,7 @@ func TestChatStreamContextCanceledMidStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	if !sr.Next() {
 		t.Fatalf("first Next = false, Err = %v", sr.Err())
 	}

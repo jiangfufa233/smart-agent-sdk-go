@@ -61,7 +61,7 @@ type ContentPart struct {
 
 func (p ContentPart) MarshalJSON() ([]byte, error) {
 	if len(p.Extra) > 0 {
-		return json.Marshal(json.RawMessage(p.Extra))
+		return json.Marshal(p.Extra)
 	}
 	switch p.Type {
 	case PartText:

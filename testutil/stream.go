@@ -67,15 +67,6 @@ func (s *ScriptedStream) record(req *model.Request) (StreamStep, bool) {
 	return step, true
 }
 
-func (s *ScriptedStream) current() StreamStep {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.i == 0 || s.i > len(s.steps) {
-		return StreamStep{}
-	}
-	return s.steps[s.i-1]
-}
-
 // materialize builds the full response of a step, as a non-streaming
 // provider would return it.
 func materialize(step StreamStep) *model.Response {

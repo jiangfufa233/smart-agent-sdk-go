@@ -30,6 +30,6 @@ func Example_productionModel() {
 		model.DefaultRetryPolicy(),
 	)
 
-	var m model.Model = model.Fallback(primary, backup)
+	m := model.Fallback(primary, backup)
 	_ = m
 }

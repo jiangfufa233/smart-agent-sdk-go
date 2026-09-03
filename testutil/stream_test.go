@@ -50,14 +50,15 @@ func TestScriptedStreamReaderSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	var texts []string
 	var finish model.StreamEvent
 	for sr.Next() {
 		ev := sr.Event()
-		if ev.Type == model.StreamTextDelta {
+		switch ev.Type {
+		case model.StreamTextDelta:
 			texts = append(texts, ev.Text)
-		} else if ev.Type == model.StreamFinish {
+		case model.StreamFinish:
 			finish = ev
 		}
 	}
@@ -95,7 +96,7 @@ func TestScriptedStreamMidStreamError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	if !sr.Next() {
 		t.Fatalf("first Next = false, Err = %v", sr.Err())
 	}
@@ -117,7 +118,7 @@ func TestScriptedStreamDeltaDelayCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	if !sr.Next() {
 		t.Fatalf("first Next = false, Err = %v", sr.Err())
 	}

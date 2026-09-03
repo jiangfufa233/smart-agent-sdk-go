@@ -276,7 +276,7 @@ func (r *Runner) streamTurn(ctx context.Context, a *Agent, req *model.Request, t
 	if cerr != nil {
 		return msg, usage, "", cerr
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 
 	var text strings.Builder
 	var calls model.ToolCallAccumulator

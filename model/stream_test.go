@@ -17,7 +17,7 @@ func TestNewStreamFromResponse(t *testing.T) {
 		Usage:        model.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
 	}
 	sr := model.NewStreamFromResponse(resp)
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 
 	var got []model.StreamEvent
 	for sr.Next() {
@@ -78,7 +78,7 @@ func TestAsStreamEmitsFullResponse(t *testing.T) {
 			FinishReason: "stop",
 		}, nil
 	})
-	var sm model.StreamModel = model.AsStream(base)
+	sm := model.AsStream(base)
 	// AsStream keeps the underlying Model usable directly.
 	if _, err := sm.Chat(context.Background(), &model.Request{}); err != nil {
 		t.Fatalf("Chat = %v", err)
@@ -87,7 +87,7 @@ func TestAsStreamEmitsFullResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChatStream = %v", err)
 	}
-	defer sr.Close()
+	defer func() { _ = sr.Close() }()
 	var got []model.StreamEvent
 	for sr.Next() {
 		got = append(got, sr.Event())

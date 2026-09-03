@@ -74,7 +74,7 @@ func main() {
 	// 4. Skills: parse SKILL.md frontmatter and expose as a tool.
 	dir, err := os.MkdirTemp("", "skilldemo")
 	must(err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	must(os.WriteFile(dir+"/SKILL.md", []byte(
 		"---\nname: pdf-extract\ndescription: Extract text from PDF files\n---\n# Steps\n1. Parse the PDF\n2. Emit text\n"), 0o644))
 	skills, err := skill.LoadDir(dir)

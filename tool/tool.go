@@ -55,10 +55,7 @@ func NewFunction(name, description string, fn any) (*FunctionTool, error) {
 
 	// Inputs: optional context.Context followed by exactly one struct argument.
 	numIn := t.NumIn()
-	hasCtx := false
-	if numIn > 0 && t.In(0) == ctxType {
-		hasCtx = true
-	}
+	hasCtx := numIn > 0 && t.In(0) == ctxType
 	if numIn-(boolToInt(hasCtx)) != 1 {
 		return nil, fmt.Errorf("tool: %q: must take exactly one input parameter (plus optional context.Context)", name)
 	}

@@ -103,7 +103,7 @@ func (c *Client) Chat(ctx context.Context, req *model.Request) (*model.Response,
 	if err != nil {
 		return nil, model.ClassifyTransportError(provider, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {

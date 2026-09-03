@@ -130,10 +130,13 @@ func TestSchemaFromType(t *testing.T) {
 		C       []string `desc:"list of c"`
 		D       time.Time
 		P       *string
-		Inner   inner  `json:"inner"`
-		skipped string //nolint:structcheck,unused
+		Inner   inner `json:"inner"`
+		skipped string
 	}
-	s, err := SchemaFromType(reflect.TypeOf(full{}))
+	// The unexported field is set to prove reflection never leaks it into
+	// the generated schema.
+	in := full{skipped: "secret"}
+	s, err := SchemaFromType(reflect.TypeOf(in))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -71,7 +71,7 @@ func (c *Client) ChatStream(ctx context.Context, req *model.Request) (model.Stre
 	}
 	if resp.StatusCode != http.StatusOK {
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, model.ClassifyTransportError(provider, readErr)
 		}

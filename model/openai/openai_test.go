@@ -60,7 +60,7 @@ func TestWireFormat(t *testing.T) {
 			t.Errorf("multimodal content not serialized as array: %s", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(okBody()))
+		_, _ = w.Write([]byte(okBody()))
 	})
 
 	req := &model.Request{
@@ -84,14 +84,14 @@ func TestAuthHeader(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Errorf("Authorization = %q", got)
 		}
-		w.Write([]byte(okBody()))
+		_, _ = w.Write([]byte(okBody()))
 	})
-	c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
+	_, _ = c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
 }
 
 func TestSuccessParse(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(okBody()))
+		_, _ = w.Write([]byte(okBody()))
 	})
 	res, err := c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
 	if err != nil {
@@ -122,7 +122,7 @@ func TestStatusMapping(t *testing.T) {
 	for _, tc := range cases {
 		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(tc.status)
-			w.Write([]byte(`{"error":{"message":"nope"}}`))
+			_, _ = w.Write([]byte(`{"error":{"message":"nope"}}`))
 		})
 		_, err := c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
 		var me *model.ModelError
@@ -137,7 +137,7 @@ func TestStatusMapping(t *testing.T) {
 
 func TestProtocolErrors(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	})
 	_, err := c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
 	var me *model.ModelError
@@ -146,7 +146,7 @@ func TestProtocolErrors(t *testing.T) {
 	}
 
 	c = newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"choices":[]}`))
+		_, _ = w.Write([]byte(`{"choices":[]}`))
 	})
 	_, err = c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
 	if !errors.As(err, &me) || me.Kind != model.ErrorProtocol {
@@ -160,7 +160,7 @@ func TestContextCanceledPassesThrough(t *testing.T) {
 		case <-r.Context().Done():
 		case <-time.After(time.Second):
 		}
-		w.Write([]byte(okBody()))
+		_, _ = w.Write([]byte(okBody()))
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()

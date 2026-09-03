@@ -60,13 +60,23 @@ func main() {
 		if input == "" {
 			continue
 		}
-		res, err := runner.RunWithHistory(context.Background(), a, history, input)
+		run := runner.RunStreamWithHistory(context.Background(), a, history, input)
+		fmt.Print("agent> ")
+		for ev := range run.Events {
+			switch ev.Type {
+			case agent.StreamTextDelta:
+				fmt.Print(ev.Text)
+			case agent.StreamRunError:
+				fmt.Fprintln(os.Stderr, "error:", ev.Err)
+			}
+		}
+		fmt.Println()
+		res, err := run.Result()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			continue
 		}
 		history = res.Messages
-		fmt.Println("agent>", res.Output)
 	}
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "read error:", err)
@@ -156,7 +166,7 @@ func stripJSONComments(b []byte) []byte {
 				}
 			} else if i+1 < len(b) && b[i+1] == '*' {
 				i += 2
-				for i+1 < len(b) && !(b[i] == '*' && b[i+1] == '/') {
+				for i+1 < len(b) && (b[i] != '*' || b[i+1] != '/') {
 					i++
 				}
 				i++ // skip the closing '/'
