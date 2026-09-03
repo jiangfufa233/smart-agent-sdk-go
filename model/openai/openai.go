@@ -15,7 +15,12 @@ import (
 	"github.com/example/agent-sdk/model"
 )
 
-const defaultBaseURL = "https://api.openai.com/v1"
+const (
+	provider          = "openai"
+	defaultBaseURL    = "https://api.openai.com/v1"
+	maxResponseBytes  = 64 << 20
+	defaultHTTPTimeot = 5 * time.Minute
+)
 
 // Config configures the OpenAI client.
 type Config struct {
@@ -45,7 +50,7 @@ func New(cfg Config) *Client {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 5 * time.Minute}
+		hc = &http.Client{Timeout: defaultHTTPTimeot}
 	}
 	return &Client{
 		apiKey:       cfg.APIKey,
@@ -55,34 +60,33 @@ func New(cfg Config) *Client {
 	}
 }
 
-// Chat performs a single chat completion request.
+// Chat performs a single chat completion request. All failures are returned
+// as *model.ModelError, except context.Canceled which passes through
+// unchanged.
 func (c *Client) Chat(ctx context.Context, req *model.Request) (*model.Response, error) {
-	modelName := req.Model
-	if modelName == "" {
-		modelName = c.defaultModel
+	if req == nil {
+		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("nil request")}
 	}
-	payload := struct {
-		Model       string            `json:"model"`
-		Messages    []model.Message   `json:"messages"`
-		Tools       []model.ToolParam `json:"tools,omitempty"`
-		Temperature *float64          `json:"temperature,omitempty"`
-		MaxTokens   int               `json:"max_tokens,omitempty"`
-	}{
-		Model:       modelName,
-		Messages:    req.Messages,
-		Tools:       req.Tools,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+	wire := *req
+	if wire.Model == "" {
+		wire.Model = c.defaultModel
+	}
+	if wire.Model == "" {
+		return nil, &model.ModelError{
+			Kind:     model.ErrorInvalidRequest,
+			Provider: provider,
+			Err:      fmt.Errorf("no model specified in request or Config.DefaultModel"),
+		}
 	}
 
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(&wire)
 	if err != nil {
-		return nil, fmt.Errorf("openai: marshal request: %w", err)
+		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("marshal request: %w", err)}
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("openai: build request: %w", err)
+		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("build request: %w", err)}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -91,36 +95,40 @@ func (c *Client) Chat(ctx context.Context, req *model.Request) (*model.Response,
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("openai: request failed: %w", err)
+		return nil, model.ClassifyTransportError(provider, err)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("openai: read response: %w", err)
+		return nil, model.ClassifyTransportError(provider, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai: unexpected status %d: %s", resp.StatusCode, truncate(data, 512))
+		return nil, model.NewHTTPError(provider, resp.StatusCode, string(data))
 	}
 
-	var wire struct {
+	var parsed struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
 		Choices []struct {
 			Message      model.Message `json:"message"`
 			FinishReason string        `json:"finish_reason"`
 		} `json:"choices"`
 		Usage model.Usage `json:"usage"`
 	}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return nil, fmt.Errorf("openai: decode response: %w", err)
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, &model.ModelError{Kind: model.ErrorProtocol, Provider: provider, Body: truncate(data, 512), Err: fmt.Errorf("decode response: %w", err)}
 	}
-	if len(wire.Choices) == 0 {
-		return nil, fmt.Errorf("openai: response contains no choices")
+	if len(parsed.Choices) == 0 {
+		return nil, &model.ModelError{Kind: model.ErrorProtocol, Provider: provider, Body: truncate(data, 512), Err: fmt.Errorf("response contains no choices")}
 	}
 
 	return &model.Response{
-		Message:      wire.Choices[0].Message,
-		FinishReason: wire.Choices[0].FinishReason,
-		Usage:        wire.Usage,
+		ID:           parsed.ID,
+		Model:        parsed.Model,
+		Message:      parsed.Choices[0].Message,
+		FinishReason: parsed.Choices[0].FinishReason,
+		Usage:        parsed.Usage,
 	}, nil
 }
 

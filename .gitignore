@@ -1,0 +1,9 @@
+# Generated artifacts
+coverage.out
+*.test
+*.out
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

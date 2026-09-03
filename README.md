@@ -1,37 +1,77 @@
 # agent-sdk（Go 版智能体开发 SDK）
 
-一个受 `openai-agents-python` 启发的轻量级 Go 智能体 SDK，提供基本的多轮对话、函数工具（Tools）、MCP 与 Skills 接入骨架，以及基于"agent-as-tool"模式的智能体编排能力。
+**English** — agent-sdk is a production-oriented Go SDK for building AI agents, inspired by `openai-agents-python`. It provides an agent loop with function tools, handoffs, skills and MCP scaffolding, plus built-in error taxonomy, retry / timeout / rate-limit / fallback for model calls, and lifecycle hooks & tracing. Core packages depend only on the Go standard library.
 
-- **零外部依赖**：仅使用 Go 标准库。
+### Quick Start (English)
+
+```go
+import (
+    "github.com/example/agent-sdk/agent"
+    "github.com/example/agent-sdk/model/openai"
+)
+
+m := openai.New(openai.Config{
+    APIKey:       os.Getenv("OPENAI_API_KEY"), // BaseURL 可指向 vLLM/Ollama/Qwen 等兼容端点
+    DefaultModel: "gpt-4o-mini",
+})
+res, err := agent.NewRunner().Run(ctx, &agent.Agent{
+    Instructions: "You are a helpful assistant.",
+    Model:        m,
+}, "Hello!")
+fmt.Println(res.Output)
+```
+
+Runnable examples live in `examples/`; API reference will be available on pkg.go.dev once the repository path is finalized.
+
+---
+
+一个受 `openai-agents-python` 启发的生产级 Go 智能体 SDK，提供多轮对话、函数工具（Tools）、MCP 与 Skills 接入、智能体编排，以及内建的错误分类、重试/超时/限流/降级、结构化日志与追踪挂点。
+
+- **核心零依赖**：`model`/`tool`/`agent` 仅使用 Go 标准库；测试使用 `go.uber.org/goleak`。
 - **Go 版本要求**：`go 1.24`+（见 `go.mod`）。
-- **模块路径**：`github.com/example/agent-sdk`（可按需改名）。
+- **模块路径**：`github.com/example/agent-sdk`（待改为实际仓库地址）。
 
 ## 目录结构
 
 ```
 agent-sdk/
-├── go.mod                  # 模块定义，无 require 条目（零依赖）
+├── go.mod                  # 模块定义
 ├── README.md               # 本文档
+├── Makefile                # fmt/vet/test/race/cover/bench/check
+├── .golangci.yml           # golangci-lint v2 配置
+├── .github/workflows/ci.yml# CI：gofmt + vet + race 测试 + 覆盖率门禁 + lint
 ├── model/                  # 模型抽象层
-│   ├── model.go            # 消息/请求/响应类型 + Model 接口
+│   ├── model.go            # 消息/请求/响应类型 + Model 接口（wire 兼容性表面）
+│   ├── errors.go           # ModelError 错误分类学（Kind/Retryable/StatusCode）
+│   ├── retry.go            # WithRetry：指数退避 + 抖动，按错误类别重试
+│   ├── timeout.go          # WithTimeout：单次调用超时
+│   ├── ratelimit.go        # WithRateLimit：惰性 token bucket（无后台 goroutine）
+│   ├── fallback.go         # Fallback：多模型降级链
 │   └── openai/
-│       └── openai.go       # OpenAI Chat Completions 适配器
+│       ├── openai.go       # OpenAI Chat Completions 适配器
+│       └── openai_test.go  # httptest 契约测试（wire 格式/状态码映射/取消语义）
 ├── tool/                   # 工具运行时
 │   ├── tool.go             # Tool 接口 + 反射版函数工具适配器
 │   └── schema.go           # 反射生成 JSON Schema
 ├── agent/                  # 智能体与执行循环
 │   ├── agent.go            # Agent 配置类型
-│   └── runner.go           # Runner 工具调用循环
+│   ├── runner.go           # Runner 工具调用循环（埋点/panic recover/超时/截断）
+│   ├── errors.go           # MaxTurnsError / ToolError
+│   └── hooks.go            # 生命周期 Hooks 接口 + slog 实现
+├── tracing/
+│   └── tracing.go          # Tracer/Span 最小接口 + Nop + slog 实现
 ├── handoff/
 │   └── handoff.go          # 智能体间委托（agent-as-tool）
 ├── skill/
 │   └── skill.go            # SKILL.md 技能加载器
 ├── mcp/
 │   └── mcp.go              # MCP 客户端接口骨架（未实现）
+├── testutil/
+│   └── testutil.go         # 脚本化假模型（测试基建，亦可用于用户测试）
 └── examples/               # 可运行示例
     ├── chat/main.go        # 多轮终端对话
     ├── tools/main.go       # 函数工具调用
-    └── offline/main.go     # 无网络冒烟测试（脚本化假模型）
+    └── offline/main.go     # 无网络冒烟测试（基于 testutil）
 ```
 
 ## 架构总览
@@ -40,32 +80,49 @@ agent-sdk/
                 ┌────────────────────────────────────────┐
                 │            agent.Runner                │
                 │  循环：调模型 → 执行工具 → 回填结果 → 再调模型  │
+                │   hooks + tracing spans + 工具防护        │
                 └───────┬──────────────────┬─────────────┘
                         │                  │
               model.Model 接口        tool.Tool 接口
                         │                  │
-            ┌───────────┴────┐    ┌────────┼─────────┬──────────┐
-            │ model/openai   │    │ tool   │ skill   │ handoff  │ mcp
-            │ Chat Completions│   │ 函数工具│ SKILL.md│ agent-as-│ (stub)
-            └────────────────┘    └────────┘  渐进披露 │  tool    │
-                                                      └──────────┘
+        ┌───────────────┼──────┐    ┌──────┼─────────┬──────────┐
+        │  韧性中间件     │      │    │ tool │ skill   │ handoff  │ mcp
+        │ retry/timeout │ openai│   │ 函数  │ SKILL.md│ agent-as-│ (stub)
+        │ ratelimit     │ 适配器 │   │ 工具  │ 渐进披露 │  tool    │
+        │ fallback      └──────┘    └──────┴─────────┴──────────┘
+        └───────────────┘
 ```
 
 依赖方向严格单向，避免循环依赖：
 
 - `tool` → `model`（工具规格使用 `model.ToolParam`）
-- `skill`、`mcp` → `tool`（把外部能力适配为 `tool.Tool`）
-- `agent` → `model` + `tool`
+- `tracing` → 无依赖
+- `skill`、`mcp` → `tool`
+- `agent` → `model` + `tool` + `tracing`
 - `handoff` → `agent` + `tool`
+- `testutil` → `model`
 - `examples/*` → 以上全部
 
 ### 核心执行流程（Runner 循环）
 
 1. 组装消息：`system`（Agent 指令）+ 历史消息 + 本轮 `user` 输入；
-2. 携带所有工具定义调用 `Model.Chat`；
-3. 若模型返回 `tool_calls`：逐个执行对应 `tool.Tool.Run`，把结果以 `role=tool` 消息回填，回到第 2 步；
-4. 若模型直接返回文本：作为最终答案结束；
-5. 超过 `Runner.MaxTurns`（默认 10）返回 `agent.ErrMaxTurns`。
+2. 携带所有工具定义调用 `Model.Chat`（触发 `OnLLMCall/OnLLMResponse` hooks 与 `model.chat` span）；
+3. 若模型返回 `tool_calls`：逐个执行对应 `tool.Tool.Run`——带独立超时、panic recover、输出截断（默认 512 KiB），失败信息以文本回填并记入 `RunResult.ToolErrors`；
+4. 若模型直接返回文本：作为最终答案结束，`RunResult` 附带 `Usage`、`Duration`、`RunID`；
+5. 超过 `Runner.MaxTurns`（默认 10）返回 `*MaxTurnsError`（`errors.Is(err, ErrMaxTurns)` 兼容）。
+
+## 可靠性设计（生产语义）
+
+| 机制 | 说明 |
+|------|------|
+| 错误分类学 | 所有 provider 失败统一为 `*model.ModelError{Kind, Retryable, StatusCode, Provider, Body}`；`errors.As` 即可判定。`context.Canceled` 永远原样透传，不会被误重试。 |
+| 重试 | `model.WithRetry`：指数退避 + 抖动 + 上限，默认只重试 `Retryable` 错误（429/5xx/超时/网络），401/400 类不重试。 |
+| 超时 | `model.WithTimeout` 单次调用超时；`Runner.ToolTimeout` 工具执行超时。 |
+| 限流 | `model.WithRateLimit` 惰性 token bucket，无后台 goroutine，ctx 感知。 |
+| 降级链 | `model.Fallback(primary, secondary...)`：可重试类失败自动切换候选；invalid_request/protocol 类停止（换后端也解决不了）。 |
+| 工具防护 | panic recover、独立超时、输出截断（防止撑爆模型上下文）；失败同时记入 `RunResult.ToolErrors` 供审计。 |
+| 泄漏防护 | 框架不启动后台 goroutine；测试以 goleak 验证。 |
+| 可观测 | `Runner.Hooks`（生命周期事件，`agent.SlogHooks` 一行接入结构化日志，只记标识与大小、不记原文与密钥）；`tracing.Tracer/Span` 最小接口，Nop 默认，OTel 适配器无需 SDK 依赖即可实现。 |
 
 ## 包与文件说明
 
@@ -73,54 +130,36 @@ agent-sdk/
 
 | 文件 | 作用 |
 |------|------|
-| `model.go` | 定义与具体厂商无关的类型：`Role`、`Message`、`ToolCall`/`FunctionCall`、`ToolParam`/`FunctionDef`（JSON Schema 挂在 `Parameters` 上）、`Request`、`Response`、`Usage`；以及核心接口 `Model { Chat(ctx, *Request) (*Response, error) }`。类型字段与 OpenAI Chat Completions 的 wire format 对齐，便于适配器直接序列化。 |
-| `openai/openai.go` | OpenAI Chat Completions 的标准库实现：`Config{APIKey, BaseURL, DefaultModel, HTTPClient}` → `Client`。发送 `POST {BaseURL}/chat/completions`，处理错误状态码并解析 `choices/usage`。**`BaseURL` 可指向任意 OpenAI 兼容端点**（vLLM、Ollama、Qwen 等），无需改代码。 |
+| `model.go` | 与厂商无关的 wire 类型：`Message`（多模态：`Content` 字符串或 `Parts` 内容数组，未知 part 类型经 `Extra` 原样透传）、`ToolCall`、`ToolParam`、`Usage`（含 cached tokens 与 `Accumulate`）、`Settings`（temperature/top_p/stop/seed/tool_choice/response_format 等，扁平序列化）、`Request`、`Response`；接口 `Model` 与适配器 `ModelFunc`。**此为冻结的兼容性表面。** |
+| `errors.go` | `ModelError` 错误分类学；`ClassifyHTTPStatus`/`NewHTTPError`/`ClassifyTransportError`。 |
+| `retry.go` / `timeout.go` / `ratelimit.go` / `fallback.go` | 全部为 `Model` 装饰器，可自由组合，如：`model.Fallback(model.WithRetry(model.WithTimeout(openai.New(cfg), 30*time.Second), p1), backup)`。 |
+| `openai/openai.go` | Chat Completions 标准库实现。`BaseURL` 可指向任意 OpenAI 兼容端点（vLLM、Ollama、Qwen 等）。所有失败返回 `*model.ModelError`。 |
 
 ### `tool/` —— 工具运行时
 
-| 文件 | 作用 |
-|------|------|
-| `tool.go` | 定义 `Tool` 接口（`Spec()` 返回工具定义、`Run(ctx, argumentsJSON)` 执行并返回文本结果）和 `FunctionTool`。`NewFunction(name, desc, fn)` 通过反射校验函数签名：支持 `func(in Args) (T, error)` 或带前置 `context.Context` 的变体；入参必须是 struct；返回值为 `string` 时原样返回，其他类型 JSON 序列化。 |
-| `schema.go` | `SchemaFromType(reflect.Type)` 递归生成 JSON Schema：string/bool/整型/浮点/数组/映射/结构体；识别 `json` 标签（命名与 `omitempty` 决定 required）、自定义 `desc` 标签生成字段描述；`time.Time` 映射为 `{"type":"string","format":"date-time"}`。 |
+`tool.go` 定义 `Tool` 接口与 `NewFunction` 反射适配器（支持 `func(in Args) (T, error)` 及前置 `ctx` 变体）；`schema.go` 递归生成 JSON Schema（`json`/`desc` 标签、required 推导、`time.Time` 映射）。
 
 ### `agent/` —— 智能体与执行循环
 
-| 文件 | 作用 |
-|------|------|
-| `agent.go` | `Agent` 配置类型：`Name`、`Instructions`（系统提示）、`Model`（实现 `model.Model` 的提供商）、`ModelName`（模型标识，如 `gpt-4o-mini`）、`Tools`。 |
-| `runner.go` | `Runner{MaxTurns}` 执行核心循环（见上图）。`Run` 开启新会话；`RunWithHistory` 在既有消息历史（可复用上一次 `RunResult.Messages`）上继续，支持多轮对话。`RunResult` 含最终答案 `Output`、`FinalMessage` 与完整 `Messages`。哨兵错误 `ErrMaxTurns`。 |
+`agent.go`（`Agent{Name, Instructions, Model, ModelName, Tools, Settings}`）、`runner.go`（核心循环 + 生产语义）、`errors.go`（`MaxTurnsError`/`ToolError`）、`hooks.go`（`Hooks` 接口、`NopHooks`、`SlogHooks`）。
 
-### `handoff/` —— 智能体编排
+### `tracing/` —— 追踪挂点
 
-| 文件 | 作用 |
-|------|------|
-| `handoff.go` | `AsTool(target *agent.Agent, r *agent.Runner)` 把目标智能体包装成名为 `transfer_to_<name>` 的工具，实现 supervisor → 子智能体委托（agent-as-tool 模式）。子智能体在自己的独立会话中运行并把最终答案返回给调用方。 |
+`Tracer{Start(ctx, name) (ctx, Span)}` + `Span{Set, End(err)}`；`Nop()` 默认、`NewSlog(*slog.Logger)` 输出 span 日志；`SpanFromContext` 取当前 span。Runner 为 run、每次模型调用、每次工具调用建 span。
 
-### `skill/` —— 技能加载
+### `testutil/` —— 测试基建
 
-| 文件 | 作用 |
-|------|------|
-| `skill.go` | 加载 `SKILL.md` 技能清单：`LoadDir` 支持"目录下直接放 SKILL.md"与"每个子目录一个 SKILL.md"两种布局；`LoadFile` 解析 `---` 分隔的极简 frontmatter（`name`/`description`）；`Skill.Tool()` 以**渐进披露**方式暴露技能——模型平时只看到名称与描述，调用工具时才返回完整正文。 |
+`Scripted` 假模型：按序回放步骤、录制每次请求（深拷贝，防调用方修改污染断言）、支持错误注入/延迟/`Func` 动态响应；`TextStep`/`ToolCallStep`/`HTTPErrorStep` 构造器。SDK 自身测试与 `examples/offline` 均基于它，推荐用户用它给自己的智能体写测试。
 
 ### `mcp/` —— MCP 接入（骨架）
 
-| 文件 | 作用 |
-|------|------|
-| `mcp.go` | 仅定义公开接口面：`Transport`（`stdio` / `streamable-http`）、`Config`、`Client`。`Connect`/`Tools` 当前返回 `ErrNotImplemented`。后续计划基于官方 `github.com/modelcontextprotocol/go-sdk` 实现，并把远端工具适配为 `tool.Tool`。 |
-
-### `examples/` —— 示例
-
-| 示例 | 运行方式 | 说明 |
-|------|----------|------|
-| `examples/chat` | `OPENAI_API_KEY=sk-... go run ./examples/chat` | 终端多轮对话：用 `RunWithHistory` 累积历史消息。 |
-| `examples/tools` | `OPENAI_API_KEY=sk-... go run ./examples/tools` | 定义 `weatherArgs` 结构体 + 天气函数，演示反射生成 schema、模型发起工具调用并得到最终回答。 |
-| `examples/offline` | `go run ./examples/offline` | **无需网络与 API Key**：用脚本化假模型完整跑通 schema 生成、工具循环、handoff 与 skill 加载，兼作冒烟测试。 |
+公开接口面已定义（`Transport`、`Config`、`Client`），实现计划基于官方 `github.com/modelcontextprotocol/go-sdk`，并把远端工具适配为 `tool.Tool`。
 
 ## 扩展指南
 
-**接入新的模型提供商**：实现 `model.Model` 接口（一个 `Chat` 方法）即可传给 `agent.Agent`；若提供商是 OpenAI 兼容协议，直接用 `openai.Config{BaseURL: ...}`。
+**接入新的模型提供商**：实现 `model.Model` 接口（一个 `Chat` 方法）；失败请返回 `*model.ModelError`（用 `ClassifyHTTPStatus`/`ClassifyTransportError` 构造）以获得正确的重试与降级行为。OpenAI 兼容协议直接用 `openai.Config{BaseURL: ...}`。
 
-**新增工具**：写一个结构体入参的函数，用 `tool.NewFunction` 包装：
+**新增工具**：
 
 ```go
 type searchArgs struct {
@@ -131,27 +170,64 @@ t, err := tool.NewFunction("search", "搜索内部知识库",
 agent.Tools = append(agent.Tools, t)
 ```
 
-**新增技能**：在目录中放 `SKILL.md`（含 `name`/`description` frontmatter），`skill.LoadDir` 加载后逐个 `Skill.Tool()` 挂到智能体上。
+**给智能体写测试**：
 
-**编排子智能体**：`handoff.AsTool(subAgent, nil)` 得到委托工具，加入主智能体的 `Tools`。
+```go
+m := testutil.NewScripted(
+    testutil.ToolCallStep("c1", "search", `{"query":"go"}`),
+    testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
+        // 断言模型收到的工具结果，再返回最终答案
+        return testutil.TextStep("done").Resp, nil
+    }},
+)
+res, err := agent.NewRunner().Run(ctx, &agent.Agent{Model: m, Tools: []tool.Tool{t}}, "q")
+```
+
+**接入结构化日志与追踪**：
+
+```go
+r := &agent.Runner{
+    Hooks:   agent.SlogHooks(slog.Default()),
+    Tracer:  tracing.NewSlog(slog.Default()),
+}
+```
+
+**生产级模型客户端推荐组合**：
+
+```go
+primary := model.WithRateLimit(model.WithRetry(model.WithTimeout(openai.New(cfg), 60*time.Second), model.DefaultRetryPolicy()), 5, 5)
+backup  := model.WithRetry(model.WithTimeout(openai.New(backupCfg), 60*time.Second), model.DefaultRetryPolicy())
+m := model.Fallback(primary, backup)
+```
 
 ## 当前状态与路线图
 
 | 能力 | 状态 |
 |------|------|
-| 多轮对话 / Runner 循环 | ✅ 可用 |
+| 多轮对话 / Runner 循环 + hooks + tracing | ✅ 可用 |
 | 函数工具 + 反射 JSON Schema | ✅ 可用 |
+| 错误分类学 / 重试 / 超时 / 限流 / 降级链 | ✅ 可用（P0） |
+| 测试基建（testutil 假模型 + 契约测试 + CI 门禁） | ✅ 可用（P0） |
 | Skills（SKILL.md 加载 + 渐进披露） | ✅ 基本可用 |
 | 智能体编排（agent-as-tool） | ✅ 基本可用 |
-| MCP 客户端 | ⬜ 接口已定义，待实现 |
-| 流式输出（SSE） | ⬜ 未实现 |
-| Guardrails / Hooks / 持久化会话 / 追踪 | ⬜ 规划中 |
+| 流式输出（SSE + 事件流） | ⬜ P1，下一阶段 |
+| MCP 客户端（stdio / streamable-http + 工具权限） | ⬜ P2 |
+| 一等 Handoff（转交语义）+ 结构化输出 | ⬜ P3 |
+| Guardrails + 全量审计日志 | ⬜ P4 |
+| 会话持久化 + 历史压缩 | ⬜ P5 |
+| soak 测试 / 故障注入 / 发布流程 | ⬜ P6 |
+
+**P0 完成标准（已达成）**：`go vet` / `go test -race` 全绿；goleak 无泄漏；库包覆盖率 86%（门禁 70%）；openai 适配器契约测试覆盖 wire 格式与状态码映射；离线冒烟全流程通过。
 
 ## 验证
 
 ```bash
-gofmt -l .          # 无输出即格式合规
-go build ./...      # 编译所有包
-go vet ./...        # 静态检查
+make check          # vet + test + race + build（CI 同款门禁）
+make cover          # 覆盖率明细（库包合计 86%）
+make bench          # 基准（schema 生成、Runner 循环）
 go run ./examples/offline   # 无网络端到端冒烟测试
 ```
+
+## License
+
+[MIT](LICENSE)

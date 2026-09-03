@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race + coverage)
+        # Examples are excluded: coverage is gated on library packages.
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/...
+
+      - name: Coverage gate
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { exit (t+0 >= 70.0) ? 0 : 1 }' \
+            || { echo "coverage ${total}% is below the 70% gate"; exit 1; }
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1

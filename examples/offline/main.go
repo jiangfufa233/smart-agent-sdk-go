@@ -1,6 +1,7 @@
 // Command offline demonstrates the full agent loop without any network access
-// by using a scripted fake model. It doubles as a smoke test for the SDK:
-// schema generation, the tool-call loop, handoffs and skills.
+// by using the scripted fake models from the testutil package. It doubles as
+// a smoke test for the SDK: schema generation, the tool-call loop, handoffs
+// and skills.
 //
 // Usage:
 //
@@ -9,7 +10,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -17,44 +17,9 @@ import (
 	"github.com/example/agent-sdk/handoff"
 	"github.com/example/agent-sdk/model"
 	"github.com/example/agent-sdk/skill"
+	"github.com/example/agent-sdk/testutil"
 	"github.com/example/agent-sdk/tool"
 )
-
-// scriptedModel returns a tool call on the first turn, then a final answer.
-type scriptedModel struct{ calls int }
-
-func (f *scriptedModel) Chat(ctx context.Context, req *model.Request) (*model.Response, error) {
-	f.calls++
-	if f.calls == 1 {
-		return &model.Response{Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:       "call_1",
-				Type:     "function",
-				Function: model.FunctionCall{Name: "get_weather", Arguments: `{"city":"Beijing"}`},
-			}},
-		}, FinishReason: "tool_calls"}, nil
-	}
-	last := req.Messages[len(req.Messages)-1]
-	if last.Role != model.RoleTool || last.Content == "" {
-		return nil, fmt.Errorf("expected tool result message, got %+v", last)
-	}
-	return &model.Response{Message: model.Message{
-		Role:    model.RoleAssistant,
-		Content: "Sunny, 21C in Beijing (via " + last.Content + ").",
-	}, FinishReason: "stop"}, nil
-}
-
-// echoModel answers directly, used by the handoff sub-agent.
-type echoModel struct{}
-
-func (e *echoModel) Chat(ctx context.Context, req *model.Request) (*model.Response, error) {
-	in := req.Messages[len(req.Messages)-1].Content
-	return &model.Response{Message: model.Message{
-		Role:    model.RoleAssistant,
-		Content: "researcher handled: " + in,
-	}, FinishReason: "stop"}, nil
-}
 
 type weatherArgs struct {
 	City string `json:"city" desc:"City name to get the weather for"`
@@ -70,15 +35,23 @@ func main() {
 			return fmt.Sprintf(`{"city":%q,"temperature_c":21}`, in.City), nil
 		})
 	must(err)
-	var schema map[string]any
-	must(json.Unmarshal(weatherTool.Spec().Function.Parameters, &schema))
 	fmt.Println("generated schema:", string(weatherTool.Spec().Function.Parameters))
 
 	// 2. Runner loop: tool call -> tool result -> final answer.
+	weatherModel := testutil.NewScripted(
+		testutil.ToolCallStep("call_1", "get_weather", `{"city":"Beijing"}`),
+		testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
+			last := req.Messages[len(req.Messages)-1]
+			if last.Role != model.RoleTool || last.Content == "" {
+				return nil, fmt.Errorf("expected tool result message, got %+v", last)
+			}
+			return testutil.TextStep("Sunny, 21C in Beijing (via " + last.Content + ").").Resp, nil
+		}},
+	)
 	a := &agent.Agent{
 		Name:         "weather-agent",
 		Instructions: "You are a helpful assistant.",
-		Model:        &scriptedModel{},
+		Model:        weatherModel,
 		Tools:        []tool.Tool{weatherTool},
 	}
 	res, err := agent.NewRunner().Run(ctx, a, "What's the weather like in Beijing?")
@@ -87,7 +60,11 @@ func main() {
 	fmt.Println("conversation turns:", len(res.Messages))
 
 	// 3. Handoff: wrap a sub-agent as a tool.
-	sub := &agent.Agent{Name: "researcher", Model: &echoModel{}}
+	researcherModel := testutil.NewScripted(testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
+		in := req.Messages[len(req.Messages)-1].Content
+		return testutil.TextStep("researcher handled: " + in).Resp, nil
+	}})
+	sub := &agent.Agent{Name: "researcher", Model: researcherModel}
 	ht, err := handoff.AsTool(sub, nil)
 	must(err)
 	out, err := ht.Run(ctx, `{"message":"look this up"}`)

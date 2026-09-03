@@ -20,4 +20,7 @@ type Agent struct {
 	ModelName string
 	// Tools are the tools the agent may call during a run.
 	Tools []tool.Tool
+	// Settings carries optional sampling parameters merged into every
+	// request (temperature, tool_choice, response_format, ...).
+	Settings *model.Settings
 }
