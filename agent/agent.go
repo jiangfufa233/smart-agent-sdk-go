@@ -20,6 +20,10 @@ type Agent struct {
 	ModelName string
 	// Tools are the tools the agent may call during a run.
 	Tools []tool.Tool
+	// Handoffs are first-class transfers to other agents. Each is exposed to
+	// the model as a "transfer_to_<name>" tool; calling it continues the run
+	// with the target agent in the same conversation.
+	Handoffs []Handoff
 	// Settings carries optional sampling parameters merged into every
 	// request (temperature, tool_choice, response_format, ...).
 	Settings *model.Settings

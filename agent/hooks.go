@@ -25,6 +25,16 @@ type Hooks interface {
 	OnToolResult(ctx context.Context, a *Agent, runID string, name, result string, err error, elapsed time.Duration)
 }
 
+// HandoffHook is an optional extension of Hooks for first-class handoffs.
+// A Hooks implementation that also implements this interface receives handoff
+// events; implementations that do not are unaffected.
+type HandoffHook interface {
+	Hooks
+	// OnHandoff is called when the run transfers control from one agent to
+	// another through a handoff tool call.
+	OnHandoff(ctx context.Context, from, to *Agent, runID string)
+}
+
 // NopHooks is the default no-op implementation.
 var NopHooks Hooks = nopHooks{}
 
@@ -97,4 +107,8 @@ func (s slogHooks) OnToolResult(ctx context.Context, a *Agent, runID string, nam
 		return
 	}
 	s.l.Debug("tool result", "agent", a.Name, "run_id", runID, "tool", name, "result_chars", len(result), "elapsed_ms", elapsed.Milliseconds())
+}
+
+func (s slogHooks) OnHandoff(ctx context.Context, from, to *Agent, runID string) {
+	s.l.Info("agent handoff", "from", from.name(), "to", to.name(), "run_id", runID)
 }

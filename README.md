@@ -1,6 +1,6 @@
 # agent-sdk（Go 版智能体开发 SDK）
 
-**English** — agent-sdk is a production-oriented Go SDK for building AI agents, inspired by `openai-agents-python`. It provides an agent loop with function tools, handoffs, skills and MCP scaffolding, built-in error taxonomy, retry / timeout / rate-limit / fallback for model calls, lifecycle hooks & tracing, and incremental streaming (`Runner.RunStream` over SSE). Core packages depend only on the Go standard library.
+**English** — agent-sdk is a production-oriented Go SDK for building AI agents, inspired by `openai-agents-python`. It provides an agent loop with function tools, MCP server integration (stdio & streamable-http) with per-tool authorization policies, first-class handoffs and nested agent-as-tool delegation, typed structured output, skills, a built-in error taxonomy, retry / timeout / rate-limit / fallback for model calls, lifecycle hooks & tracing, and incremental streaming (`Runner.RunStream` over SSE). Core packages depend only on the Go standard library; MCP support builds on the official `modelcontextprotocol/go-sdk`.
 
 ### Quick Start (English)
 
@@ -38,14 +38,45 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
+MCP server tools (launched as a child process, or reached over HTTP):
+
+```go
+c, _ := mcp.NewClient(mcp.Config{
+    Transport: mcp.TransportStdio,
+    Command:   "npx",
+    Args:      []string{"-y", "@modelcontextprotocol/server-everything"},
+    Policy:    tool.Denylist("write_file"), // optional authorization
+})
+_ = c.Connect(ctx)
+defer c.Close()
+mcpTools, _ := c.Tools(ctx)
+agent.Tools = append(agent.Tools, mcpTools...)
+```
+
+First-class handoffs (the conversation continues with the target agent) and typed structured output:
+
+```go
+specialist := &agent.Agent{Instructions: "You are a research specialist.", Model: specialistModel}
+myAgent.Handoffs = []agent.Handoff{handoff.New(specialist)}
+res, _ := agent.NewRunner().Run(ctx, myAgent, "Find papers on X.")
+// res.Transfers == []string{"specialist"}, res.Agent == specialist
+
+type Report struct {
+    City   string  `json:"city"`
+    TempC  float64 `json:"temp_c"`
+}
+typed, err := agent.RunTyped[Report](ctx, agent.NewRunner(), myAgent, "weather in Beijing?")
+fmt.Println(typed.Value.City) // decoded into the Go type
+```
+
 Runnable examples live in `examples/`; API reference: [pkg.go.dev/github.com/jiangfufa233/smart-agent-sdk-go](https://pkg.go.dev/github.com/jiangfufa233/smart-agent-sdk-go).
 
 ---
 
 一个受 `openai-agents-python` 启发的生产级 Go 智能体 SDK，提供多轮对话、函数工具（Tools）、MCP 与 Skills 接入、智能体编排，以及内建的错误分类、重试/超时/限流/降级、结构化日志与追踪挂点。
 
-- **核心零依赖**：`model`/`tool`/`agent` 仅使用 Go 标准库；测试使用 `go.uber.org/goleak`。
-- **Go 版本要求**：`go 1.24`+（见 `go.mod`）。
+- **核心零依赖**：`model`/`tool`/`agent` 仅使用 Go 标准库；`mcp` 包基于官方 `modelcontextprotocol/go-sdk`（本库唯一生产依赖）；测试使用 `go.uber.org/goleak`。
+- **Go 版本要求**：`go 1.25`+（`go.mod`；由 go-sdk 依赖决定）。
 - **模块路径**：`github.com/jiangfufa233/smart-agent-sdk-go`。
 
 ## 目录结构
@@ -72,27 +103,34 @@ agent-sdk/
 │       └── openai_test.go  # httptest 契约测试（wire 格式/状态码映射/取消语义/流式）
 ├── tool/                   # 工具运行时
 │   ├── tool.go             # Tool 接口 + 反射版函数工具适配器
-│   └── schema.go           # 反射生成 JSON Schema
+│   ├── schema.go           # 反射生成 JSON Schema
+│   └── policy.go           # 工具权限/审批：Policy + WithPolicy 守卫
 ├── agent/                  # 智能体与执行循环
-│   ├── agent.go            # Agent 配置类型
-│   ├── runner.go           # Runner 工具调用循环（埋点/panic recover/超时/截断）
+│   ├── agent.go            # Agent 配置类型（含 Handoffs 转交声明）
+│   ├── runner.go           # Runner 工具调用循环（埋点/panic recover/超时/截断/转交）
+│   ├── handoff.go          # 一等 Handoff：transfer_to_* 工具规格 + 注册表 + 系统消息切换
+│   ├── structured.go       # RunTyped[T]：schema 注入 + 结构化输出解码
 │   ├── stream.go           # Runner.RunStream 事件流（流式 + 非流式自动降级）
 │   ├── errors.go           # MaxTurnsError / ToolError
-│   └── hooks.go            # 生命周期 Hooks 接口 + slog 实现
+│   └── hooks.go            # 生命周期 Hooks 接口 + slog 实现（含可选 HandoffHook）
 ├── tracing/
 │   └── tracing.go          # Tracer/Span 最小接口 + Nop + slog 实现
 ├── handoff/
-│   └── handoff.go          # 智能体间委托（agent-as-tool）
+│   └── handoff.go          # 智能体间委托：一等 Handoff 构造器 + agent-as-tool
 ├── skill/
 │   └── skill.go            # SKILL.md 技能加载器
 ├── mcp/
-│   └── mcp.go              # MCP 客户端接口骨架（未实现）
+│   ├── mcp.go              # MCP 客户端：stdio / streamable-http + 握手 + 生命周期
+│   └── adapter.go          # 远端 MCP 工具 → tool.Tool 适配（schema/结果展平/IsError）
 ├── testutil/
 │   ├── testutil.go         # 脚本化假模型（测试基建，亦可用于用户测试）
 │   └── stream.go           # 脚本化流式假模型（StreamStep/TextChunk/ToolCallChunk）
 └── examples/               # 可运行示例
     ├── chat/main.go        # 多轮终端对话
     ├── tools/main.go       # 函数工具调用
+    ├── mcp/                # MCP：stdio 子进程 + 策略拒绝 + agent 循环
+    │   ├── main.go
+    │   └── server/main.go
     └── offline/main.go     # 无网络冒烟测试（基于 testutil）
 ```
 
@@ -109,8 +147,8 @@ agent-sdk/
                         │                  │
         ┌───────────────┼──────┐    ┌──────┼─────────┬──────────┐
         │  韧性中间件     │      │    │ tool │ skill   │ handoff  │ mcp
-        │ retry/timeout │ openai│   │ 函数  │ SKILL.md│ agent-as-│ (stub)
-        │ ratelimit     │ 适配器 │   │ 工具  │ 渐进披露 │  tool    │
+        │ retry/timeout │ openai│   │ 函数  │ SKILL.md│ 一等转交/ │ stdio/
+        │ ratelimit     │ 适配器 │   │ 工具  │ 渐进披露 │ as-tool  │ http
         │ fallback      └──────┘    └──────┴─────────┴──────────┘
         └───────────────┘
 ```
@@ -119,7 +157,7 @@ agent-sdk/
 
 - `tool` → `model`（工具规格使用 `model.ToolParam`）
 - `tracing` → 无依赖
-- `skill`、`mcp` → `tool`
+- `skill` → `tool`；`mcp` → `tool` + 官方 go-sdk
 - `agent` → `model` + `tool` + `tracing`
 - `handoff` → `agent` + `tool`
 - `testutil` → `model`
@@ -130,8 +168,9 @@ agent-sdk/
 1. 组装消息：`system`（Agent 指令）+ 历史消息 + 本轮 `user` 输入；
 2. 携带所有工具定义调用 `Model.Chat`（触发 `OnLLMCall/OnLLMResponse` hooks 与 `model.chat` span）；
 3. 若模型返回 `tool_calls`：逐个执行对应 `tool.Tool.Run`——带独立超时、panic recover、输出截断（默认 512 KiB），失败信息以文本回填并记入 `RunResult.ToolErrors`；
-4. 若模型直接返回文本：作为最终答案结束，`RunResult` 附带 `Usage`、`Duration`、`RunID`；
-5. 超过 `Runner.MaxTurns`（默认 10）返回 `*MaxTurnsError`（`errors.Is(err, ErrMaxTurns)` 兼容）。
+4. 若 `tool_calls` 中含转交工具（`Agent.Handoffs` 声明的 `transfer_to_*`）：记入转交标记结果，待该消息所有工具调用都有结果后切换"当前智能体"——重建工具面与采样设置、以目标智能体的指令替换 system 消息，继续同一对话（`RunResult.Agent`/`Transfers` 报告转交路径；`MaxTurns` 约束所有智能体的模型调用总数）；
+5. 若模型直接返回文本：作为最终答案结束，`RunResult` 附带 `Usage`、`Duration`、`RunID`；
+6. 超过 `Runner.MaxTurns`（默认 10）返回 `*MaxTurnsError`（`errors.Is(err, ErrMaxTurns)` 兼容）。
 
 ## 可靠性设计（生产语义）
 
@@ -143,6 +182,9 @@ agent-sdk/
 | 限流 | `model.WithRateLimit` 惰性 token bucket，无后台 goroutine，ctx 感知。 |
 | 降级链 | `model.Fallback(primary, secondary...)`：可重试类失败自动切换候选；invalid_request/protocol 类停止（换后端也解决不了）。 |
 | 工具防护 | panic recover、独立超时、输出截断（防止撑爆模型上下文）；失败同时记入 `RunResult.ToolErrors` 供审计。 |
+| 工具权限 | `tool.Policy` + `tool.WithPolicy`：Allowlist/Denylist/自定义审批回调（可阻塞等人工确认），拒绝以类型化 `*tool.AuthorizationError` 报告且不执行工具，拒绝原因回填给模型；MCP 远端工具经 `mcp.Config.Policy` 一行接入。 |
+| 智能体编排 | 一等 Handoff（`agent.Handoff`/`handoff.New`）：每个转交暴露为空参 `transfer_to_<name>` 工具，调用后同一对话继续由目标智能体处理（工具面/设置/系统提示切换，全历史共享）；校验 nil 目标、nil 目标模型与工具名冲突；`RunResult.Agent`/`Transfers` + `StreamHandoff` 事件 + 可选 `agent.HandoffHook` 全程可观测；嵌套 agent-as-tool（`handoff.AsTool`）保留用于子任务隔离。 |
+| 结构化输出 | `agent.RunTyped[T]`：由 Go 类型反射生成 `json_schema` 响应格式注入请求（不修改原 Agent、已有 `ResponseFormat` 则尊重不改），最终输出剥 Markdown 围栏后解码进 `TypedResult.Value`；解码失败返回 `*agent.StructuredOutputError`（含原始文本），`errors.As` 可判。 |
 | 流式 | `Runner.RunStream` 事件流：文本/工具调用增量、`StreamFinalOutput`/`StreamRunError` 终态事件恰好一个；模型未实现流式自动降级为单次 `Chat`。SSE 层（`model/sse`）符合 WHATWG 规范（LF/CRLF/CR、注释 keepalive、BOM），带 fuzz 测试；OpenAI 流式适配器把"无 finish_reason 也无 [DONE] 就断流"明确报为 protocol 错误，不会静默当成功。`context.Canceled` 原样透传。 |
 | 泄漏防护 | 框架不启动后台 goroutine（事件流的生产 goroutine 随 ctx 取消或事件耗尽退出）；测试以 goleak 验证。 |
 | 可观测 | `Runner.Hooks`（生命周期事件，`agent.SlogHooks` 一行接入结构化日志，只记标识与大小、不记原文与密钥）；`tracing.Tracer/Span` 最小接口，Nop 默认，OTel 适配器无需 SDK 依赖即可实现。 |
@@ -163,11 +205,11 @@ agent-sdk/
 
 ### `tool/` —— 工具运行时
 
-`tool.go` 定义 `Tool` 接口与 `NewFunction` 反射适配器（支持 `func(in Args) (T, error)` 及前置 `ctx` 变体）；`schema.go` 递归生成 JSON Schema（`json`/`desc` 标签、required 推导、`time.Time` 映射）。
+`tool.go` 定义 `Tool` 接口与 `NewFunction` 反射适配器（支持 `func(in Args) (T, error)` 及前置 `ctx` 变体）；`schema.go` 递归生成 JSON Schema（`json`/`desc` 标签、required 推导、`time.Time` 映射）；`policy.go` 提供调用前授权：`Policy` 接口（`PolicyFunc`/`Allowlist`/`Denylist`/`AllowAll`）+ `WithPolicy` 守卫装饰器，拒绝返回 `*AuthorizationError`（`errors.As` 可判），工具不执行、原因回填模型。
 
 ### `agent/` —— 智能体与执行循环
 
-`agent.go`（`Agent{Name, Instructions, Model, ModelName, Tools, Settings}`）、`runner.go`（核心循环 + 生产语义）、`stream.go`（`Runner.RunStream/RunStreamWithHistory` 事件流：`StreamRunStarted/TextDelta/ToolCallStarted/Args/Finished/ToolResult/FinalOutput/RunError`，非流式模型自动降级，`Wait()` 一步收取结果）、`errors.go`（`MaxTurnsError`/`ToolError`）、`hooks.go`（`Hooks` 接口、`NopHooks`、`SlogHooks`）。
+`agent.go`（`Agent{Name, Instructions, Model, ModelName, Tools, Handoffs, Settings}`）、`runner.go`（核心循环 + 生产语义 + 转交语义）、`handoff.go`（`Handoff{Target, Name, Description}` 转交声明：`Spec()` 生成 `transfer_to_<slug>` 空参工具、`buildAgentRegs` 注册表与冲突校验、`switchSystemMessage` 系统提示切换）、`structured.go`（`RunTyped[T]`/`TypedResult[T]`/`StructuredOutputError` + 围栏剥离）、`stream.go`（`Runner.RunStream/RunStreamWithHistory` 事件流：`StreamRunStarted/TextDelta/ToolCallStarted/Args/Finished/ToolResult/Handoff/FinalOutput/RunError`，非流式模型自动降级，`Wait()` 一步收取结果）、`errors.go`（`MaxTurnsError`/`ToolError`）、`hooks.go`（`Hooks` 接口、可选扩展 `HandoffHook`、`NopHooks`、`SlogHooks`）。
 
 ### `tracing/` —— 追踪挂点
 
@@ -177,9 +219,9 @@ agent-sdk/
 
 `Scripted` 假模型：按序回放步骤、录制每次请求（深拷贝，防调用方修改污染断言）、支持错误注入/延迟/`Func` 动态响应；`TextStep`/`ToolCallStep`/`HTTPErrorStep` 构造器。`ScriptedStream` 流式假模型：`StreamStep` 定义增量序列、finish/usage、请求级与流中错误注入、逐 delta 延迟（测取消与慢消费者）；同一份脚本可分别走 `Chat` 与 `ChatStream` 验证一致性。SDK 自身测试与 `examples/offline` 均基于它，推荐用户用它给自己的智能体写测试。
 
-### `mcp/` —— MCP 接入（骨架）
+### `mcp/` —— MCP 接入（基于官方 go-sdk）
 
-公开接口面已定义（`Transport`、`Config`、`Client`），实现计划基于官方 `github.com/modelcontextprotocol/go-sdk`，并把远端工具适配为 `tool.Tool`。
+`mcp.go`（`Client`：`NewClient(Config)` → `Connect` 握手 → `Tools` 列出远端工具 → `Close`；`TransportStdio` 以子进程启动 server，`Close` 终止；`TransportHTTP` 走 streamable-http，`DisableStandaloneSSE` 可关）；`adapter.go`（远端工具适配为 `tool.Tool`：inputSchema 透传、结果展平为文本——文本直传/二进制与 blob 以尺寸占位/结构化输出去重附加、`IsError` 映射为错误并回填模型；空参数映射为 `{}`）。`Config.Policy` 对每次远端调用做授权（见 `tool.Policy`）。测试覆盖内存传输全栈、真子进程 stdio 端到端、httptest HTTP 端到端、进程崩溃/连接拒绝故障注入，goleak 把关。
 
 ## 扩展指南
 
@@ -208,6 +250,53 @@ m := testutil.NewScripted(
 )
 res, err := agent.NewRunner().Run(ctx, &agent.Agent{Model: m, Tools: []tool.Tool{t}}, "q")
 ```
+
+**接入 MCP server**：
+
+```go
+c, err := mcp.NewClient(mcp.Config{
+    Transport: mcp.TransportStdio,
+    Command:   "npx",
+    Args:      []string{"-y", "@modelcontextprotocol/server-everything"},
+    Policy:    tool.Denylist("write_file"), // 可选：调用前授权
+})
+if err != nil { ... }
+if err := c.Connect(ctx); err != nil { ... }  // 启动子进程 + MCP 握手
+defer c.Close()
+tools, err := c.Tools(ctx)                    // []tool.Tool，直接挂给 agent
+agent.Tools = append(agent.Tools, tools...)
+```
+
+streamable-http 用 `mcp.Config{Transport: mcp.TransportHTTP, URL: "https://..."}`；自定义审批（人工确认）实现 `tool.Policy` 传入即可。
+
+**智能体编排（Handoff 与 agent-as-tool）**：
+
+```go
+// 一等转交：目标智能体在同一对话中接管（共享全历史与 token 预算）。
+specialist := &agent.Agent{Name: "specialist", Instructions: "...", Model: m2}
+myAgent.Handoffs = []agent.Handoff{handoff.New(specialist)}
+res, err := agent.NewRunner().Run(ctx, myAgent, "研究一下 X")
+// res.Transfers == []string{"specialist"}，res.Agent == specialist
+
+// 嵌套委托（agent-as-tool）：子任务独立成 run，只把最终答案交回上级。
+subTool, err := handoff.AsTool(specialist, nil)
+agent.Tools = append(agent.Tools, subTool)
+```
+
+转交链可观测：`agent.StreamHandoff` 事件携带 `FromAgent/ToAgent`；实现 `agent.HandoffHook`（可选扩展 `agent.Hooks`）即可在 `OnHandoff` 中收到每次转交。
+
+**结构化输出（typed JSON）**：
+
+```go
+type Report struct {
+    City   string  `json:"city"`
+    TempC  float64 `json:"temp_c" desc:"摄氏温度"`
+}
+typed, err := agent.RunTyped[Report](ctx, agent.NewRunner(), myAgent, "北京天气？")
+// typed.Value.City；失败时 errors.As(err, *agent.StructuredOutputError) 拿原始文本
+```
+
+`RunTyped` 反射 `Report` 生成 `json_schema` 响应格式注入请求（不改原 Agent，已有 `ResponseFormat` 则尊重现值），并容忍模型在 JSON 外包一层 Markdown 代码围栏。
 
 **接入结构化日志与追踪**：
 
@@ -255,10 +344,10 @@ res, err := run.Result()
 | 流式输出（SSE 解析 + StreamModel + Runner.RunStream 事件流 + 非流式降级） | ✅ 可用（P1） |
 | 测试基建（testutil 假模型 + 契约测试 + CI 门禁） | ✅ 可用（P0） |
 | Skills（SKILL.md 加载 + 渐进披露） | ✅ 基本可用 |
-| 智能体编排（agent-as-tool） | ✅ 基本可用 |
-| MCP 客户端（stdio / streamable-http + 工具权限） | ⬜ P2，下一阶段 |
-| 一等 Handoff（转交语义）+ 结构化输出 | ⬜ P3 |
-| Guardrails + 全量审计日志 | ⬜ P4 |
+| 智能体编排（一等 Handoff 转交语义 + agent-as-tool） | ✅ 可用（P3） |
+| 结构化输出（RunTyped[T] schema 注入 + 类型化解码） | ✅ 可用（P3） |
+| MCP 客户端（stdio / streamable-http + 工具适配）+ 工具权限/审批 | ✅ 可用（P2） |
+| Guardrails + 全量审计日志 | ⬜ P4，下一阶段 |
 | 会话持久化 + 历史压缩 | ⬜ P5 |
 | soak 测试 / 故障注入 / 发布流程 | ⬜ P6 |
 
@@ -266,13 +355,18 @@ res, err := run.Result()
 
 **P1 完成标准（已达成）**：SSE 解析器 fuzz（410 万次执行）无失败且分块输入与整流输入事件一致；OpenAI 流式契约测试覆盖文本/工具增量聚合、[DONE]、断流、429、坏 JSON、ctx 取消；Runner 事件流测试覆盖降级、多轮工具、错误注入、取消无泄漏（goleak）；离线冒烟含流式演示通过。
 
+**P2 完成标准（已达成）**：MCP 客户端覆盖 stdio 与 streamable-http（官方 go-sdk v1.7）；内存传输全栈契约测试 + 真子进程 stdio 端到端 + httptest HTTP 端到端；故障注入覆盖命令不存在/进程秒退/死端点/Close 后调用/ctx 超时；`tool.Policy` 权限层单测覆盖 allow/deny/透传/防双重包裹/拒绝不执行；goleak 把关（含 go-sdk 服务端连接）；examples/mcp 演示策略拒绝 + 远程调用进入 agent 循环。
+
+**P3 完成标准（已达成）**：一等转交在 `Run` 与 `RunStream` 两条循环语义一致（系统提示/工具面/设置切换、全历史共享、转交标记回填）；转交链（A→B→C）与并行工具调用+转交混合消息均覆盖；`MaxTurns` 约束跨智能体的模型调用总数（测试断言）；转交校验（nil 目标/nil 目标模型/工具名冲突/重复转交/切换目标非法）全部报错；`HandoffHook` 为可选扩展，普通 `Hooks` 实现者零改动兼容；`StreamHandoff` 事件含 `FromAgent/ToAgent` 且先于 `StreamFinalOutput`；`RunTyped` 覆盖 schema 注入、已有格式保留、设置保留且原 Agent 不被修改、围栏剥离、解码失败类型化错误、不支持类型报错；库包覆盖率 89%（门禁 70%）；goleak 全绿。
+
 ## 验证
 
 ```bash
 make check          # vet + test + race + build（CI 同款门禁）
-make cover          # 覆盖率明细（库包合计 86%）
+make cover          # 覆盖率明细（库包合计 89%）
 make bench          # 基准（schema 生成、Runner 循环）
 go run ./examples/offline   # 无网络端到端冒烟测试
+go run ./examples/mcp       # MCP 端到端：子进程 server + 策略 + agent 循环
 ```
 
 ## License

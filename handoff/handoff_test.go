@@ -37,6 +37,21 @@ func TestAsToolDelegates(t *testing.T) {
 	}
 }
 
+func TestNewFirstClass(t *testing.T) {
+	target := &agent.Agent{Name: "Research Specialist", Model: testutil.NewScripted(testutil.TextStep("ok"))}
+	h := New(target)
+	if h.Target != target {
+		t.Fatal("New must return a handoff to the given target")
+	}
+	spec := h.Spec()
+	if spec.Function.Name != "transfer_to_research_specialist" {
+		t.Fatalf("tool name = %q", spec.Function.Name)
+	}
+	if string(spec.Function.Parameters) != `{"type":"object","properties":{}}` {
+		t.Fatalf("parameters = %s", spec.Function.Parameters)
+	}
+}
+
 func TestAsToolNilTarget(t *testing.T) {
 	if _, err := AsTool(nil, nil); err == nil {
 		t.Fatal("expected error for nil target")

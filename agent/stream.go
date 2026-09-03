@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
 
 // StreamEventType discriminates the kind of a StreamEvent.
@@ -21,6 +20,7 @@ const (
 	StreamToolCallArgs     StreamEventType = "tool_call_args"
 	StreamToolCallFinished StreamEventType = "tool_call_finished"
 	StreamToolResult       StreamEventType = "tool_result"
+	StreamHandoff          StreamEventType = "handoff"
 	StreamFinalOutput      StreamEventType = "final_output"
 	StreamRunError         StreamEventType = "run_error"
 )
@@ -42,6 +42,9 @@ type StreamEvent struct {
 	Result string
 	// ToolErr is non-nil on StreamToolResult when the tool failed.
 	ToolErr *ToolError
+	// FromAgent and ToAgent are set on StreamHandoff events.
+	FromAgent string
+	ToAgent   string
 	// FinishReason is reported on StreamFinalOutput.
 	FinishReason string
 	// Usage is the accumulated run usage, reported on StreamFinalOutput.
@@ -159,39 +162,37 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 	msgs = append(msgs, history...)
 	msgs = append(msgs, model.Message{Role: model.RoleUser, Content: input})
 
-	specs := make([]model.ToolParam, 0, len(a.Tools))
-	byName := make(map[string]tool.Tool, len(a.Tools))
-	for _, t := range a.Tools {
-		spec := t.Spec()
-		specs = append(specs, spec)
-		byName[spec.Function.Name] = t
+	// cur mirrors the handoff semantics of the non-streaming loop: a handoff
+	// tool call swaps the active agent (tool surface, settings and system
+	// prompt) mid-run.
+	cur := a
+	regs, err := buildAgentRegs(cur)
+	if err != nil {
+		return nil, err
 	}
-
-	var settings model.Settings
-	if a.Settings != nil {
-		settings = *a.Settings
-	}
+	settings := settingsFor(cur)
 
 	var toolErrs []*ToolError
 	var usage model.Usage
+	var transfers []string
 
 	for turn := 0; turn < opts.maxTurns; turn++ {
 		req := &model.Request{
-			Model:    a.ModelName,
+			Model:    cur.ModelName,
 			Messages: msgs,
-			Tools:    specs,
+			Tools:    regs.specs,
 			Settings: settings,
 		}
-		hooks.OnLLMCall(ctx, a, opts.runID, turn, req)
+		hooks.OnLLMCall(ctx, cur, opts.runID, turn, req)
 		callCtx, callSpan := opts.tracer.Start(ctx, "model.chat")
-		callSpan.Set("model", a.ModelName)
+		callSpan.Set("model", cur.ModelName)
 		t0 := time.Now()
-		msg, turnUsage, finishReason, err := r.streamTurn(callCtx, a, req, turn, opts, ch)
+		msg, turnUsage, finishReason, err := r.streamTurn(callCtx, cur, req, turn, opts, ch)
 		var resp *model.Response
 		if err == nil {
 			resp = &model.Response{Message: msg, FinishReason: finishReason, Usage: turnUsage}
 		}
-		hooks.OnLLMResponse(ctx, a, opts.runID, turn, resp, err, time.Since(t0))
+		hooks.OnLLMResponse(ctx, cur, opts.runID, turn, resp, err, time.Since(t0))
 		callSpan.End(err)
 		if err != nil {
 			return nil, fmt.Errorf("agent: model call failed: %w", err)
@@ -206,11 +207,13 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 				Messages:     msgs,
 				ToolErrors:   toolErrs,
 				Usage:        usage,
+				Agent:        cur,
+				Transfers:    transfers,
 			}
 			ch <- StreamEvent{
 				Type:         StreamFinalOutput,
 				RunID:        opts.runID,
-				Agent:        a.Name,
+				Agent:        cur.Name,
 				Turn:         turn,
 				Text:         msg.Content,
 				FinishReason: finishReason,
@@ -219,23 +222,66 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 			return res, nil
 		}
 
+		// Assistant message requesting tool calls, then one result per call.
+		// Every call must get a result to keep the transcript valid, so a
+		// handoff only takes effect after all of them are recorded.
 		msgs = append(msgs, msg)
+		var next *Agent
 		for _, tc := range msg.ToolCalls {
+			if h, ok := regs.handoffs[tc.Function.Name]; ok {
+				toolCtx, toolSpan := opts.tracer.Start(ctx, "tool."+tc.Function.Name)
+				hooks.OnToolCall(toolCtx, cur, opts.runID, tc.Function.Name, tc.Function.Arguments)
+				result := handoffToolOutput(h)
+				hooks.OnToolResult(toolCtx, cur, opts.runID, tc.Function.Name, result, nil, 0)
+				toolSpan.End(nil)
+				if hh, ok := hooks.(HandoffHook); ok {
+					hh.OnHandoff(ctx, cur, h.Target, opts.runID)
+				}
+				if !sendEvent(ctx, ch, StreamEvent{
+					Type:   StreamToolResult,
+					RunID:  opts.runID,
+					Agent:  cur.Name,
+					Turn:   turn,
+					Call:   tc,
+					Result: result,
+				}) {
+					return nil, ctx.Err()
+				}
+				if !sendEvent(ctx, ch, StreamEvent{
+					Type:      StreamHandoff,
+					RunID:     opts.runID,
+					Agent:     cur.Name,
+					Turn:      turn,
+					FromAgent: cur.name(),
+					ToAgent:   h.Target.name(),
+				}) {
+					return nil, ctx.Err()
+				}
+				msgs = append(msgs, model.Message{
+					Role:       model.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    result,
+				})
+				transfers = append(transfers, h.Target.name())
+				next = h.Target
+				continue
+			}
 			toolCtx, toolSpan := opts.tracer.Start(ctx, "tool."+tc.Function.Name)
-			hooks.OnToolCall(toolCtx, a, opts.runID, tc.Function.Name, tc.Function.Arguments)
+			hooks.OnToolCall(toolCtx, cur, opts.runID, tc.Function.Name, tc.Function.Arguments)
 			t1 := time.Now()
-			result, terr := r.execTool(toolCtx, tc.Function.Name, tc.Function.Arguments, byName, opts)
+			result, terr := r.execTool(toolCtx, tc.Function.Name, tc.Function.Arguments, regs.tools, opts)
 			var errOut error
 			if terr != nil {
 				errOut = terr
 				toolErrs = append(toolErrs, terr)
 			}
-			hooks.OnToolResult(toolCtx, a, opts.runID, tc.Function.Name, result, errOut, time.Since(t1))
+			hooks.OnToolResult(toolCtx, cur, opts.runID, tc.Function.Name, result, errOut, time.Since(t1))
 			toolSpan.End(errOut)
 			if !sendEvent(ctx, ch, StreamEvent{
 				Type:    StreamToolResult,
 				RunID:   opts.runID,
-				Agent:   a.Name,
+				Agent:   cur.Name,
 				Turn:    turn,
 				Call:    tc,
 				Result:  result,
@@ -249,6 +295,15 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 				Name:       tc.Function.Name,
 				Content:    result,
 			})
+		}
+		if next != nil {
+			regs, err = buildAgentRegs(next)
+			if err != nil {
+				return nil, fmt.Errorf("agent: switch to agent %q: %w", next.name(), err)
+			}
+			settings = settingsFor(next)
+			msgs = switchSystemMessage(msgs, next)
+			cur = next
 		}
 	}
 	return nil, &MaxTurnsError{MaxTurns: opts.maxTurns}

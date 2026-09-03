@@ -1,7 +1,7 @@
 // Command offline demonstrates the full agent loop without any network access
 // by using the scripted fake models from the testutil package. It doubles as
-// a smoke test for the SDK: schema generation, the tool-call loop, handoffs,
-// skills and streaming.
+// a smoke test for the SDK: schema generation, the tool-call loop, handoffs
+// (both patterns), structured output, skills and streaming.
 //
 // Usage:
 //
@@ -71,7 +71,47 @@ func main() {
 	must(err)
 	fmt.Println("handoff result>", out)
 
-	// 4. Skills: parse SKILL.md frontmatter and expose as a tool.
+	// 4. First-class handoff: a transfer_to_* tool call continues the run
+	// with the target agent in the same conversation.
+	specialist := &agent.Agent{
+		Name:         "Research Specialist",
+		Instructions: "You are a research specialist.",
+		Model: testutil.NewScripted(testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
+			if req.Messages[0].Role != model.RoleSystem || req.Messages[0].Content != "You are a research specialist." {
+				return nil, fmt.Errorf("system prompt not switched: %+v", req.Messages[0])
+			}
+			return testutil.TextStep("Research done: 3 papers found.").Resp, nil
+		}}),
+	}
+	supervisor := &agent.Agent{
+		Name:         "supervisor",
+		Instructions: "You route research questions.",
+		Model: testutil.NewScripted(
+			testutil.ToolCallStep("call_2", "transfer_to_research_specialist", "{}"),
+		),
+		Handoffs: []agent.Handoff{handoff.New(specialist)},
+	}
+	res2, err := agent.NewRunner().Run(ctx, supervisor, "Find papers on agent frameworks.")
+	must(err)
+	fmt.Printf("handoff> transfers=%v final_agent=%s output=%q\n",
+		res2.Transfers, res2.Agent.Name, res2.Output)
+
+	// 5. Structured output: RunTyped injects a json_schema response format
+	// derived from the Go type and decodes the final answer into it.
+	type weatherReport struct {
+		City        string  `json:"city"`
+		Temperature float64 `json:"temperature" desc:"Temperature in Celsius"`
+	}
+	typed, err := agent.RunTyped[weatherReport](ctx, agent.NewRunner(),
+		&agent.Agent{
+			Name:  "structured",
+			Model: testutil.NewScripted(testutil.TextStep("```json\n{\"city\":\"Beijing\",\"temperature\":21}\n```")),
+		}, "weather in Beijing?")
+	must(err)
+	fmt.Printf("typed> %+v (schema name %q)\n", typed.Value,
+		typed.Result.Agent.Settings.ResponseFormat.JSONSchema.Name)
+
+	// 6. Skills: parse SKILL.md frontmatter and expose as a tool.
 	dir, err := os.MkdirTemp("", "skilldemo")
 	must(err)
 	defer func() { _ = os.RemoveAll(dir) }()
@@ -85,7 +125,7 @@ func main() {
 	must(err)
 	fmt.Printf("skill %q loaded, body:\n%s\n", skills[0].Name, body)
 
-	// 5. Streaming: incremental events via Runner.RunStream.
+	// 7. Streaming: incremental events via Runner.RunStream.
 	streamModel := testutil.NewScriptedStream(testutil.StreamStep{
 		Deltas:       []model.StreamEvent{testutil.TextChunk("Hel"), testutil.TextChunk("lo"), testutil.TextChunk(", world!")},
 		FinishReason: "stop",

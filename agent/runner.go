@@ -66,6 +66,12 @@ type RunResult struct {
 	Duration time.Duration
 	// RunID identifies this run in hooks and traces.
 	RunID string
+	// Agent is the agent that produced the final output. It differs from the
+	// agent the run started with when a handoff occurred.
+	Agent *Agent
+	// Transfers lists, in order, the names of the agents the conversation
+	// was handed to during the run.
+	Transfers []string
 }
 
 // Run starts a fresh conversation with a and sends it input.
@@ -146,35 +152,32 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 	msgs = append(msgs, history...)
 	msgs = append(msgs, model.Message{Role: model.RoleUser, Content: input})
 
-	specs := make([]model.ToolParam, 0, len(a.Tools))
-	byName := make(map[string]tool.Tool, len(a.Tools))
-	for _, t := range a.Tools {
-		spec := t.Spec()
-		specs = append(specs, spec)
-		byName[spec.Function.Name] = t
+	// cur is the agent currently handling the conversation; a handoff tool
+	// call swaps it (tool surface, settings and system prompt) mid-run.
+	cur := a
+	regs, err := buildAgentRegs(cur)
+	if err != nil {
+		return nil, err
 	}
-
-	var settings model.Settings
-	if a.Settings != nil {
-		settings = *a.Settings
-	}
+	settings := settingsFor(cur)
 
 	var toolErrs []*ToolError
 	var usage model.Usage
+	var transfers []string
 
 	for turn := 0; turn < opts.maxTurns; turn++ {
 		req := &model.Request{
-			Model:    a.ModelName,
+			Model:    cur.ModelName,
 			Messages: msgs,
-			Tools:    specs,
+			Tools:    regs.specs,
 			Settings: settings,
 		}
-		hooks.OnLLMCall(ctx, a, opts.runID, turn, req)
+		hooks.OnLLMCall(ctx, cur, opts.runID, turn, req)
 		callCtx, callSpan := opts.tracer.Start(ctx, "model.chat")
-		callSpan.Set("model", a.ModelName)
+		callSpan.Set("model", cur.ModelName)
 		t0 := time.Now()
-		resp, err := a.Model.Chat(callCtx, req)
-		hooks.OnLLMResponse(callCtx, a, opts.runID, turn, resp, err, time.Since(t0))
+		resp, err := cur.Model.Chat(callCtx, req)
+		hooks.OnLLMResponse(callCtx, cur, opts.runID, turn, resp, err, time.Since(t0))
 		callSpan.End(err)
 		if err != nil {
 			return nil, fmt.Errorf("agent: model call failed: %w", err)
@@ -190,22 +193,46 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 				Messages:     msgs,
 				ToolErrors:   toolErrs,
 				Usage:        usage,
+				Agent:        cur,
+				Transfers:    transfers,
 			}, nil
 		}
 
 		// Assistant message requesting tool calls, then one result per call.
+		// Every call must get a result to keep the transcript valid, so a
+		// handoff only takes effect after all of them are recorded.
 		msgs = append(msgs, msg)
+		var next *Agent
 		for _, tc := range msg.ToolCalls {
+			if h, ok := regs.handoffs[tc.Function.Name]; ok {
+				toolCtx, toolSpan := opts.tracer.Start(ctx, "tool."+tc.Function.Name)
+				hooks.OnToolCall(toolCtx, cur, opts.runID, tc.Function.Name, tc.Function.Arguments)
+				result := handoffToolOutput(h)
+				hooks.OnToolResult(toolCtx, cur, opts.runID, tc.Function.Name, result, nil, 0)
+				toolSpan.End(nil)
+				if hh, ok := hooks.(HandoffHook); ok {
+					hh.OnHandoff(ctx, cur, h.Target, opts.runID)
+				}
+				msgs = append(msgs, model.Message{
+					Role:       model.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    result,
+				})
+				transfers = append(transfers, h.Target.name())
+				next = h.Target
+				continue
+			}
 			toolCtx, toolSpan := opts.tracer.Start(ctx, "tool."+tc.Function.Name)
-			hooks.OnToolCall(toolCtx, a, opts.runID, tc.Function.Name, tc.Function.Arguments)
+			hooks.OnToolCall(toolCtx, cur, opts.runID, tc.Function.Name, tc.Function.Arguments)
 			t1 := time.Now()
-			result, terr := r.execTool(toolCtx, tc.Function.Name, tc.Function.Arguments, byName, opts)
+			result, terr := r.execTool(toolCtx, tc.Function.Name, tc.Function.Arguments, regs.tools, opts)
 			var errOut error
 			if terr != nil {
 				errOut = terr
 				toolErrs = append(toolErrs, terr)
 			}
-			hooks.OnToolResult(toolCtx, a, opts.runID, tc.Function.Name, result, errOut, time.Since(t1))
+			hooks.OnToolResult(toolCtx, cur, opts.runID, tc.Function.Name, result, errOut, time.Since(t1))
 			toolSpan.End(errOut)
 			msgs = append(msgs, model.Message{
 				Role:       model.RoleTool,
@@ -213,6 +240,15 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 				Name:       tc.Function.Name,
 				Content:    result,
 			})
+		}
+		if next != nil {
+			regs, err = buildAgentRegs(next)
+			if err != nil {
+				return nil, fmt.Errorf("agent: switch to agent %q: %w", next.name(), err)
+			}
+			settings = settingsFor(next)
+			msgs = switchSystemMessage(msgs, next)
+			cur = next
 		}
 	}
 	return nil, &MaxTurnsError{MaxTurns: opts.maxTurns}

@@ -26,3 +26,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
   70% coverage on library packages, golangci-lint).
 - Handoff (agent-as-tool delegation), SKILL.md skills, MCP interface
   scaffold.
+- MCP server integration (`mcp` package, built on the official
+  `modelcontextprotocol/go-sdk`): stdio child-process and streamable-http
+  transports, initialize handshake, remote tools adapted to `tool.Tool`
+  with schema passthrough, result flattening and `IsError` mapping.
+- Tool authorization (`tool.Policy`, `tool.WithPolicy`, `Allowlist`,
+  `Denylist`, `AllowAll`, custom approval callbacks); denials are typed
+  (`*tool.AuthorizationError`), do not execute the tool, and are reported
+  back to the model.
+- First-class handoffs (`agent.Handoff`, `handoff.New`): each handoff is
+  exposed as a `transfer_to_<name>` tool; calling it continues the same run
+  with the target agent — tool surface, sampling settings and system prompt
+  switch mid-conversation, `RunResult.Agent`/`Transfers` report the path,
+  `MaxTurns` bounds model calls across all agents, and `StreamHandoff`
+  events plus the optional `agent.HandoffHook` extension keep handoffs
+  observable. The nested agent-as-tool pattern (`handoff.AsTool`) remains
+  available.
+- Structured output: `agent.RunTyped[T]` derives a `json_schema` response
+  format from the Go type, injects it without mutating the configured
+  agent, tolerates Markdown code fences, and decodes the final answer into
+  `TypedResult.Value`; decode failures return a typed
+  `*agent.StructuredOutputError` carrying the raw model text.
