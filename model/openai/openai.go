@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	provider          = "openai"
-	defaultBaseURL    = "https://api.openai.com/v1"
-	maxResponseBytes  = 64 << 20
-	defaultHTTPTimeot = 5 * time.Minute
+	provider           = "openai"
+	defaultBaseURL     = "https://api.openai.com/v1"
+	maxResponseBytes   = 64 << 20
+	defaultHTTPTimeout = 5 * time.Minute
 )
 
 // Config configures the OpenAI client.
@@ -32,15 +32,24 @@ type Config struct {
 	DefaultModel string
 	// HTTPClient overrides the HTTP client used for requests.
 	HTTPClient *http.Client
+	// DisableStreamUsage stops the client from sending
+	// stream_options.include_usage on streaming calls. Enable it for
+	// backends that reject the parameter; Usage on streams will then be
+	// zero.
+	DisableStreamUsage bool
 }
 
-// Client is an OpenAI Chat Completions implementation of model.Model.
+// Client is an OpenAI Chat Completions implementation of model.Model and
+// model.StreamModel.
 type Client struct {
-	apiKey       string
-	baseURL      string
-	defaultModel string
-	httpClient   *http.Client
+	apiKey             string
+	baseURL            string
+	defaultModel       string
+	httpClient         *http.Client
+	disableStreamUsage bool
 }
+
+var _ model.StreamModel = (*Client)(nil)
 
 // New creates a Client from cfg.
 func New(cfg Config) *Client {
@@ -50,13 +59,14 @@ func New(cfg Config) *Client {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: defaultHTTPTimeot}
+		hc = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
-		apiKey:       cfg.APIKey,
-		baseURL:      baseURL,
-		defaultModel: cfg.DefaultModel,
-		httpClient:   hc,
+		apiKey:             cfg.APIKey,
+		baseURL:            baseURL,
+		defaultModel:       cfg.DefaultModel,
+		httpClient:         hc,
+		disableStreamUsage: cfg.DisableStreamUsage,
 	}
 }
 
@@ -84,13 +94,9 @@ func (c *Client) Chat(ctx context.Context, req *model.Request) (*model.Response,
 		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("marshal request: %w", err)}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+	httpReq, err := c.newHTTPRequest(ctx, body)
 	if err != nil {
-		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("build request: %w", err)}
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		return nil, err
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -137,4 +143,17 @@ func truncate(b []byte, n int) string {
 		b = b[:n]
 	}
 	return string(b)
+}
+
+// newHTTPRequest builds the authenticated POST for a marshaled payload.
+func (c *Client) newHTTPRequest(ctx context.Context, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("build request: %w", err)}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	return req, nil
 }

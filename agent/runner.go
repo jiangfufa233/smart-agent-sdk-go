@@ -59,7 +59,8 @@ type RunResult struct {
 	// ToolErrors lists tool invocations that failed during the run. Their
 	// error text was still fed back to the model.
 	ToolErrors []*ToolError
-	// Usage is the token consumption of the final model call.
+	// Usage is the total token consumption across all model calls of the
+	// run.
 	Usage model.Usage
 	// Duration is the wall time of the whole run.
 	Duration time.Duration
@@ -99,6 +100,26 @@ func (r *Runner) run(ctx context.Context, a *Agent, history []model.Message, inp
 	if a.Model == nil {
 		return nil, errors.New("agent: agent has no model configured")
 	}
+	opts := r.runOpts()
+
+	hooks := r.hooks()
+	spanCtx, span := opts.tracer.Start(ctx, "agent.run")
+	span.Set("agent", a.Name)
+	ctx = hooks.OnRunStart(spanCtx, a, opts.runID, input)
+
+	started := time.Now()
+	res, err := r.loop(ctx, a, history, input, opts)
+	if res != nil {
+		res.Duration = time.Since(started)
+		res.RunID = opts.runID
+	}
+	hooks.OnRunEnd(ctx, a, opts.runID, res, err)
+	span.End(err)
+	return res, err
+}
+
+// runOpts resolves defaults and generates the run ID.
+func (r *Runner) runOpts() runOpts {
 	opts := runOpts{
 		maxTurns:    r.MaxTurns,
 		toolTimeout: r.ToolTimeout,
@@ -115,21 +136,7 @@ func (r *Runner) run(ctx context.Context, a *Agent, history []model.Message, inp
 		opts.tracer = tracing.Nop()
 	}
 	opts.runID = newRunID()
-
-	hooks := r.hooks()
-	spanCtx, span := opts.tracer.Start(ctx, "agent.run")
-	span.Set("agent", a.Name)
-	ctx = hooks.OnRunStart(spanCtx, a, opts.runID, input)
-
-	started := time.Now()
-	res, err := r.loop(ctx, a, history, input, opts)
-	if res != nil {
-		res.Duration = time.Since(started)
-		res.RunID = opts.runID
-	}
-	hooks.OnRunEnd(ctx, a, opts.runID, res, err)
-	span.End(err)
-	return res, err
+	return opts
 }
 
 func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts) (*RunResult, error) {
@@ -153,6 +160,7 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 	}
 
 	var toolErrs []*ToolError
+	var usage model.Usage
 
 	for turn := 0; turn < opts.maxTurns; turn++ {
 		req := &model.Request{
@@ -171,6 +179,7 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 		if err != nil {
 			return nil, fmt.Errorf("agent: model call failed: %w", err)
 		}
+		usage.Accumulate(resp.Usage)
 
 		msg := resp.Message
 		if len(msg.ToolCalls) == 0 {
@@ -180,7 +189,7 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 				FinalMessage: msg,
 				Messages:     msgs,
 				ToolErrors:   toolErrs,
-				Usage:        resp.Usage,
+				Usage:        usage,
 			}, nil
 		}
 

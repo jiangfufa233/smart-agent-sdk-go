@@ -1,7 +1,7 @@
 // Command offline demonstrates the full agent loop without any network access
 // by using the scripted fake models from the testutil package. It doubles as
-// a smoke test for the SDK: schema generation, the tool-call loop, handoffs
-// and skills.
+// a smoke test for the SDK: schema generation, the tool-call loop, handoffs,
+// skills and streaming.
 //
 // Usage:
 //
@@ -84,6 +84,27 @@ func main() {
 	body, err := st.Run(ctx, "{}")
 	must(err)
 	fmt.Printf("skill %q loaded, body:\n%s\n", skills[0].Name, body)
+
+	// 5. Streaming: incremental events via Runner.RunStream.
+	streamModel := testutil.NewScriptedStream(testutil.StreamStep{
+		Deltas:       []model.StreamEvent{testutil.TextChunk("Hel"), testutil.TextChunk("lo"), testutil.TextChunk(", world!")},
+		FinishReason: "stop",
+		Usage:        model.Usage{PromptTokens: 4, CompletionTokens: 3, TotalTokens: 7},
+	})
+	run := agent.NewRunner().RunStream(ctx, &agent.Agent{Name: "streamer", Model: streamModel}, "Greet the world.")
+	for ev := range run.Events {
+		switch ev.Type {
+		case agent.StreamTextDelta:
+			fmt.Print(ev.Text)
+		case agent.StreamFinalOutput:
+			fmt.Printf("\nstream> done, finish=%s, usage=%d tokens\n", ev.FinishReason, ev.Usage.TotalTokens)
+		case agent.StreamRunError:
+			fmt.Println("stream> error:", ev.Err)
+		}
+	}
+	if _, err := run.Result(); err != nil {
+		must(err)
+	}
 }
 
 func must(err error) {
