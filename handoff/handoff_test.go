@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/agent"
-	"github.com/jiangfufa233/openai-agent-sdk-go/model"
-	"github.com/jiangfufa233/openai-agent-sdk-go/testutil"
+	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
 )
 
 func TestAsToolDelegates(t *testing.T) {

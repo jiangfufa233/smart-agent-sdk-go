@@ -1,4 +1,4 @@
-module github.com/jiangfufa233/openai-agent-sdk-go
+module github.com/jiangfufa233/smart-agent-sdk-go
 
 go 1.24
 

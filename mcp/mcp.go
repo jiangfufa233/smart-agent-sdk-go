@@ -9,7 +9,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
 
 // ErrNotImplemented marks functionality pending in the MVP scaffold.

@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/model"
 )
 
 const (

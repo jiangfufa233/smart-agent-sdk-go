@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/model"
-	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
 
 // StreamEventType discriminates the kind of a StreamEvent.

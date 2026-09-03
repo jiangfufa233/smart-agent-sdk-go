@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/model"
 )
 
 // Hooks receives lifecycle events for every run executed by a Runner.

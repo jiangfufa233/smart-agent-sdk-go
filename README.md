@@ -6,8 +6,8 @@
 
 ```go
 import (
-    "github.com/jiangfufa233/openai-agent-sdk-go/agent"
-    "github.com/jiangfufa233/openai-agent-sdk-go/model/openai"
+    "github.com/jiangfufa233/smart-agent-sdk-go/agent"
+    "github.com/jiangfufa233/smart-agent-sdk-go/model/openai"
 )
 
 m := openai.New(openai.Config{
@@ -38,7 +38,7 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
-Runnable examples live in `examples/`; API reference: [pkg.go.dev/github.com/jiangfufa233/openai-agent-sdk-go](https://pkg.go.dev/github.com/jiangfufa233/openai-agent-sdk-go).
+Runnable examples live in `examples/`; API reference: [pkg.go.dev/github.com/jiangfufa233/smart-agent-sdk-go](https://pkg.go.dev/github.com/jiangfufa233/smart-agent-sdk-go).
 
 ---
 
@@ -46,7 +46,7 @@ Runnable examples live in `examples/`; API reference: [pkg.go.dev/github.com/jia
 
 - **核心零依赖**：`model`/`tool`/`agent` 仅使用 Go 标准库；测试使用 `go.uber.org/goleak`。
 - **Go 版本要求**：`go 1.24`+（见 `go.mod`）。
-- **模块路径**：`github.com/jiangfufa233/openai-agent-sdk-go`。
+- **模块路径**：`github.com/jiangfufa233/smart-agent-sdk-go`。
 
 ## 目录结构
 

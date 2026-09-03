@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
 
 // ExampleNewFunction shows the reflection-based function tool adapter: the

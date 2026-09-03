@@ -7,7 +7,7 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/model/sse"
+	"github.com/jiangfufa233/smart-agent-sdk-go/model/sse"
 )
 
 func decodeAll(t *testing.T, r io.Reader) ([]sse.Event, error) {

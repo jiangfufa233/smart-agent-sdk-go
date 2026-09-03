@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/jiangfufa233/openai-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/model"
 )
 
 // Tool is anything an agent can invoke during a run.
