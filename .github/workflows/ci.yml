@@ -24,7 +24,7 @@ jobs:
 
       - name: Test (race + coverage)
         # Examples are excluded: coverage is gated on library packages.
-        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/... ./audit/... ./guardrail/... ./session/...
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/... ./audit/... ./guardrail/... ./session/... ./sandbox/... ./builtins/...
 
       - name: Coverage gate
         run: |
@@ -32,6 +32,12 @@ jobs:
           echo "total coverage: ${total}%"
           awk -v t="$total" 'BEGIN { exit (t+0 >= 70.0) ? 0 : 1 }' \
             || { echo "coverage ${total}% is below the 70% gate"; exit 1; }
+
+      - name: Cross-compile
+        # Sandbox backends are platform-specific: prove they all build.
+        run: |
+          GOOS=windows go build ./...
+          GOOS=darwin go build ./...
 
       - name: Lint
         uses: golangci/golangci-lint-action@v6

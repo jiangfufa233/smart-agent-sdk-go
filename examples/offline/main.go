@@ -20,9 +20,11 @@ import (
 
 	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
 	"github.com/jiangfufa233/smart-agent-sdk-go/audit"
+	"github.com/jiangfufa233/smart-agent-sdk-go/builtins"
 	"github.com/jiangfufa233/smart-agent-sdk-go/guardrail"
 	"github.com/jiangfufa233/smart-agent-sdk-go/handoff"
 	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/sandbox"
 	"github.com/jiangfufa233/smart-agent-sdk-go/session"
 	"github.com/jiangfufa233/smart-agent-sdk-go/skill"
 	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
@@ -237,6 +239,48 @@ func main() {
 	items, err = sess.GetItems(ctx, 0)
 	must(err)
 	fmt.Println("session items after compression runs:", len(items), "(storage stays lossless)")
+
+	// 10. Sandboxed built-in tools: the shell and read-only file tools run
+	// every command under a Landlock-confined sandbox — writes limited to
+	// the workspace, network denied, timeouts killing the process tree.
+	// Tool arguments are the commands and paths themselves, so the audit
+	// layer captures them verbatim; failures come back as text the model
+	// can adapt to instead of aborting the run.
+	workspace, err := os.MkdirTemp("", "agentws")
+	must(err)
+	defer func() { _ = os.RemoveAll(workspace) }()
+	sb, err := sandbox.Auto(workspace)
+	must(err)
+	defer func() { _ = sb.Close() }()
+	shellTool, err := builtins.NewShellTool(builtins.ShellConfig{Workspace: workspace, Sandbox: sb})
+	must(err)
+	fileTool, err := builtins.NewFileTool(builtins.FileConfig{Roots: []string{workspace}})
+	must(err)
+	sandboxAgent := &agent.Agent{
+		Name:         "sandboxed",
+		Instructions: "Work strictly inside the workspace.",
+		Model: testutil.NewScripted(
+			testutil.ToolCallStep("s1", "shell", `{"command":"echo hi > note.txt"}`),
+			testutil.ToolCallStep("s2", "shell", `{"command":"cat /etc/passwd"}`),
+			testutil.ToolCallStep("s3", "read_file", `{"path":"note.txt"}`),
+			testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
+				last := req.Messages[len(req.Messages)-1]
+				if last.Role != model.RoleTool || strings.TrimSpace(last.Content) != "hi" {
+					return nil, fmt.Errorf("expected note.txt content, got %+v", last)
+				}
+				return testutil.TextStep("note.txt was written and read back; the /etc/passwd read was denied by the sandbox.").Resp, nil
+			}},
+		),
+		Tools: []tool.Tool{shellTool, fileTool},
+	}
+	res5, err := agent.NewRunner().Run(ctx, sandboxAgent, "Write a note, then read /etc/passwd.")
+	must(err)
+	fmt.Printf("sandbox> capabilities=%+v\n", sb.Capabilities())
+	fmt.Println("sandbox>", sb.Describe())
+	fmt.Println("sandbox>", res5.Output)
+	for _, te := range res5.ToolErrors {
+		fmt.Printf("sandbox> denied: %s: %s\n", te.Tool, te.Err)
+	}
 }
 
 // chatModel answers every call with a description of what it received,

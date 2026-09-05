@@ -21,6 +21,7 @@
 | [10](#10-接入-mcp-服务器) | 接入 MCP | 复用现成的 MCP 工具生态 |
 | [11](#11-韧性重试超时限流降级) | 韧性 | 生产环境的网络与配额问题 |
 | [12](#12-测试你的智能体) | 测试 | 不花 token 地测智能体逻辑 |
+| [13](#13-内置安全工具sandbox) | 内置安全工具 | 让智能体执行命令/读文件而不裸奔 |
 | [附录 A](#附录-a架构总览) | 架构总览 | 想了解内部结构 |
 | [附录 B](#附录-b与-openai-agents-python-的语义差异) | 与 openai-agents-python 的差异 | 从 Python 版迁移过来 |
 
@@ -546,6 +547,62 @@ res, err := run.Wait()
 - 剧本按序回放，耗尽时报 `testutil.ErrScriptExhausted`——这本身就是断言（"不该有第 3 次调用"）。
 - 注入故障：`Step.Err`、`testutil.HTTPErrorStep(429, "rate limited")`，配合第 11 课的 `WithRetry` 验证韧性逻辑。
 - 持续负载与泄漏检查：`SOAK_ITERS=3000 make soak`（可调轮数），覆盖流式/故障注入/三种会话存储/压缩器的长时间运行。
+
+## 13. 内置安全工具（sandbox）
+
+**什么时候需要**：想让智能体执行命令、读文件——shell 是生产环境里最大的攻击面。函数工具（第 4 课）把执行点留在你的代码里，但没有隔离；MCP 本地服务器（第 10 课）同样跑在你的权限下。内置安全工具把执行点收归 SDK：每条命令在**内核级沙箱**里跑，写仅限工作区、网络禁用，配合 deny 规则与审批构成三层防线。
+
+先建一个沙箱（`sandbox.Auto` 给出安全默认：工作区可写、常见系统路径只读、禁网、默认超时 30 秒）：
+
+```go
+sb, err := sandbox.Auto("/path/to/workspace") // 会自动创建目录
+if err != nil { log.Fatal(err) }             // 默认 fail-closed：内核不支持就报错
+defer sb.Close()
+```
+
+再把两个内置工具挂到智能体上：
+
+```go
+shell, err := builtins.NewShellTool(builtins.ShellConfig{
+    Workspace: "/path/to/workspace",
+    Sandbox:   sb, // 必填：拒绝注册无沙箱的 shell
+})
+reader, err := builtins.NewFileTool(builtins.FileConfig{
+    Roots: []string{"/path/to/workspace"}, // 只读，路径逃逸/软链/二进制/超大会被拒
+})
+
+a := &agent.Agent{
+    Name:  "ops",
+    Model: model, // 任意 model.Model
+    Tools: []tool.Tool{shell, reader},
+}
+```
+
+模型这时可以调用 `shell`（参数 `{"command":"..."}`）与 `read_file`（参数 `{"path":"..."}`）。工具参数本身就是命令和路径，所以第 9 课的审计层会**逐字记录**每一次执行的完整命令，零额外代码。
+
+危险命令的拦截分两层。第一层是 deny 规则（默认启用 `builtins.DefaultDenyRules()`：递归删除、mkfs、`curl | sh`、sudo、写 `/etc` 等），命中后返回 `*tool.AuthorizationError`，其文本会作为工具结果回给模型：
+
+```go
+_, err := shell.Run(ctx, `{"command":"rm -rf /data"}`)
+// err: tool "shell" denied by policy: command matches deny rule "..."
+```
+
+第二层是审批：用第 4 课的 `tool.WithPolicy` 包装，人类在环时同步阻塞等待决定：
+
+```go
+approved := tool.WithPolicy(shell, tool.PolicyFunc(func(ctx context.Context, call tool.ToolCall) error {
+    var args struct{ Command string `json:"command"` }
+    json.Unmarshal([]byte(call.Arguments), &args)
+    return askHuman(ctx, args.Command) // nil 放行，error 拒绝
+}))
+```
+
+**要点**：
+- **fail-closed 贯穿始终**：`sandbox.Auto` 在 Landlock 不可用的内核上直接报错（Linux ≥ 5.13；禁网需要 ≥ 6.7 的 ABI v4）；`NewShellTool` 沙箱缺失直接拒绝注册。只有显式传 `Config.Lax=true` 才降级，且降级后 `sb.Capabilities()` 如实自报哪些限制真实生效。
+- **沙箱是安全边界，deny 规则只是护栏**：规则挡"显而易见的错误"，绕过很容易（`rm` 换名字）；真正的防线是 Landlock——工作区外写、任意网络都被内核拒绝，逃逸测试矩阵（读 `/etc`、软链逃逸、拨号、超时杀树）在 CI 里持续验证。
+- **防不住提示注入诱导的合法操作**：模型被诱导在工作区内写恶意文件，沙箱不拦——这类威胁要靠 `WithPolicy` 审批 + 审计兜底。
+- **`Sandbox` 是长生命周期对象**（Linux 上每个实例驻留一个受限 spawn 线程），每个智能体/工具建一个，不要每次调用新建；`Close` 会杀掉仍在运行的进程树。
+- 平台差异：Linux = Landlock + 进程组杀 + prlimit（可选资源限额）；Windows = Job Object 树杀（尽力隔离，无路径/网络限制）；`Capabilities()` 会告诉你真实生效的位。受限更严的替代路线：把执行放进容器或远程沙箱（如 Firecracker），SDK 侧的 `sandbox` 接口设计便于未来接入。
 
 ## 附录 A：架构总览
 

@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: fmt vet lint test race cover bench build soak soak-race check
+.PHONY: fmt vet lint test race cover bench build cross soak soak-race check
 
 fmt:
 	$(GO) fmt ./...
@@ -19,7 +19,7 @@ race:
 
 cover:
 	$(GO) test -race -count=1 -covermode=atomic -coverprofile=coverage.out \
-		./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/... ./audit/... ./guardrail/... ./session/...
+		./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/... ./audit/... ./guardrail/... ./session/... ./sandbox/... ./builtins/...
 	$(GO) tool cover -func=coverage.out
 
 bench:
@@ -27,6 +27,12 @@ bench:
 
 build:
 	$(GO) build ./...
+
+# cross proves the platform-specific sandbox backends (Landlock, Job
+# Objects, process groups) compile on every supported OS.
+cross:
+	GOOS=windows $(GO) build ./...
+	GOOS=darwin $(GO) build ./...
 
 # Soak: opt-in sustained-load scenarios (streaming/handoffs, fault
 # injection, session stores, compressors) with goroutine/heap/fd leak
@@ -38,4 +44,4 @@ soak-race:
 	SOAK_ITERS=$(ITERS) $(GO) test -race -count=1 ./soak
 
 # check runs the same gates CI enforces.
-check: vet test race build
+check: vet test race build cross

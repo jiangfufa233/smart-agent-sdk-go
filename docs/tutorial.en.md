@@ -21,6 +21,7 @@ From zero to production: build a Go agent step by step. Each lesson answers thre
 | [10](#10-mcp-servers) | MCP servers | Reusing the MCP tool ecosystem |
 | [11](#11-resilience-retry-timeout-rate-limit-fallback) | Resilience | Production networks and quotas |
 | [12](#12-testing-your-agent) | Testing | Testing agent logic without tokens |
+| [13](#13-built-in-security-tools-sandbox) | Built-in security tools | Letting the agent run commands and read files safely |
 | [Appendix A](#appendix-aarchitecture-overview) | Architecture overview | Understanding the internals |
 | [Appendix B](#appendix-bdifferences-from-openai-agents-python) | Differences from openai-agents-python | Migrating from the Python version |
 
@@ -540,6 +541,62 @@ res, err := run.Wait()
 - Scripts replay in order and report `testutil.ErrScriptExhausted` when exhausted — which is itself an assertion ("there should not have been a third call").
 - Fault injection: `Step.Err`, `testutil.HTTPErrorStep(429, "rate limited")`, combined with lesson 11's `WithRetry` to verify resilience.
 - Sustained load and leak checks: `SOAK_ITERS=3000 make soak` (iterations configurable) over streaming / fault injection / all three session stores / compressors.
+
+## 13. Built-in security tools (sandbox)
+
+**When you need it**: the moment you want the agent to run commands or read files — the shell is the largest attack surface in production. Function tools (lesson 4) keep the execution point in your code but offer no isolation, and local MCP servers (lesson 10) run with your privileges too. Built-in security tools pull the execution point into the SDK: every command runs inside a **kernel-level sandbox** with writes limited to the workspace and networking disabled, with deny rules and approval as further layers.
+
+Create a sandbox first (`sandbox.Auto` provides safe defaults: workspace writable, common system paths read-only, network denied, 30s default timeout):
+
+```go
+sb, err := sandbox.Auto("/path/to/workspace") // creates the directory
+if err != nil { log.Fatal(err) }             // fail-closed by default: errors out on unsupported kernels
+defer sb.Close()
+```
+
+Then attach the two built-in tools to an agent:
+
+```go
+shell, err := builtins.NewShellTool(builtins.ShellConfig{
+    Workspace: "/path/to/workspace",
+    Sandbox:   sb, // required: refuses to register an unconfined shell
+})
+reader, err := builtins.NewFileTool(builtins.FileConfig{
+    Roots: []string{"/path/to/workspace"}, // read-only; escapes, symlinks, binaries and oversize are refused
+})
+
+a := &agent.Agent{
+    Name:  "ops",
+    Model: model, // any model.Model
+    Tools: []tool.Tool{shell, reader},
+}
+```
+
+The model can now call `shell` (argument `{"command":"..."}`) and `read_file` (argument `{"path":"..."}`). The tool arguments are themselves the commands and paths, so the audit layer from lesson 9 **records every executed command verbatim** with zero extra code.
+
+Dangerous commands are stopped on two layers. The first is deny rules (on by default via `builtins.DefaultDenyRules()`: recursive deletes, mkfs, `curl | sh`, sudo, writes into `/etc`, ...). A hit returns `*tool.AuthorizationError`, whose text is fed back to the model as the tool result:
+
+```go
+_, err := shell.Run(ctx, `{"command":"rm -rf /data"}`)
+// err: tool "shell" denied by policy: command matches deny rule "..."
+```
+
+The second layer is approval: wrap with `tool.WithPolicy` from lesson 4; a human-in-the-loop policy blocks synchronously until a person decides:
+
+```go
+approved := tool.WithPolicy(shell, tool.PolicyFunc(func(ctx context.Context, call tool.ToolCall) error {
+    var args struct{ Command string `json:"command"` }
+    json.Unmarshal([]byte(call.Arguments), &args)
+    return askHuman(ctx, args.Command) // nil allows, error denies
+}))
+```
+
+**Key points**:
+- **Fail-closed all the way down**: `sandbox.Auto` errors out on kernels without Landlock (Linux ≥ 5.13; denying network needs ABI v4, kernel ≥ 6.7), and `NewShellTool` refuses to register without a sandbox. Only an explicit `Config.Lax=true` downgrades, and `sb.Capabilities()` then reports honestly which restrictions actually took effect.
+- **The sandbox is the security boundary; deny rules are just a guardrail**: they catch obvious mistakes and are trivially bypassed (rename `rm`); the real defense is Landlock — writes outside the workspace and any networking are denied by the kernel, continuously verified by the escape test matrix (reading `/etc`, symlink escapes, dialing, timeout tree-kill) in CI.
+- **It cannot stop prompt-injected but legitimate operations**: a model tricked into writing a malicious file inside the workspace is not stopped by the sandbox — that threat class is handled by `WithPolicy` approval plus the audit trail.
+- **A `Sandbox` is long-lived** (on Linux each instance keeps one dedicated spawn thread): create one per agent/tool, not per call; `Close` kills any still-running process tree.
+- Platform differences: Linux = Landlock + process-group kill + optional prlimit resource limits; Windows = Job Object tree kill (best effort, no path/network restrictions); `Capabilities()` reports which bits are real. For stronger isolation, run execution inside a container or remote sandbox (e.g. Firecracker) — the SDK-side design leaves room for that.
 
 ## Appendix A: Architecture overview
 

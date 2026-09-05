@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Sandboxed built-in security tools. The new `sandbox` package confines
+  child processes with kernel primitives — Landlock (path whitelists and
+  network denial on Linux 5.13+, applied via a dedicated spawn thread),
+  Job Objects on Windows (best-effort tree kill), process groups elsewhere
+  — with fail-closed construction, honest capability self-reporting
+  (`Capabilities` / `Describe`), timeouts that kill the whole process
+  tree, sanitized environments and optional `prlimit` resource limits.
+- The new `builtins` package exposes that containment as first-party
+  tools: `NewShellTool` (denies destructive commands via `DefaultDenyRules`,
+  returns `*tool.AuthorizationError` so the model can adapt) and
+  `NewFileTool` (read-only, root-constrained, symlink-escape-proof,
+  refuses binary and oversized files). Both refuse to register without a
+  sandbox. Approval integrates through the existing `tool.WithPolicy`.
+- Escape test matrix (reads outside the workspace, symlink escapes,
+  network dials, orphan-free timeout kills, environment sanitization) and
+  a goleak test for the sandbox package; cross-compile gate for
+  windows/darwin in `make cross` and CI.
+- Tutorial lesson 13 ("内置安全工具"), offline example section 10, README
+  and CI updates. `golang.org/x/sys` is now a direct dependency.
+
 ## [0.2.0] - 2026-09-05
 
 ### Added

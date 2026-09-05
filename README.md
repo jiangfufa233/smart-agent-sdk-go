@@ -6,12 +6,13 @@ integration (stdio & streamable-http) with per-tool authorization policies,
 first-class handoffs and agent-as-tool delegation, typed structured output,
 input/output guardrails, audit logging, session persistence with view-level
 history compression, resilience middleware (retry / timeout / rate limit /
-fallback), lifecycle hooks & tracing, and incremental SSE streaming. Start with
+fallback), lifecycle hooks & tracing, incremental SSE streaming, and sandboxed
+built-in tools (kernel-level shell execution and safe file reads). Start with
 the [English tutorial](docs/tutorial.en.md); API reference lives on
 [pkg.go.dev](https://pkg.go.dev/github.com/jiangfufa233/smart-agent-sdk-go).
 
 中文 — 一个生产级 Go 智能体开发 SDK，对标 `openai-agents-python`。渐进式教程见
-[docs/tutorial.md](docs/tutorial.md)（12 课 + 附录，每课可运行、有语义要点与常见坑）。
+[docs/tutorial.md](docs/tutorial.md)（13 课 + 附录，每课可运行、有语义要点与常见坑）。
 
 ## 特性
 
@@ -25,14 +26,16 @@ the [English tutorial](docs/tutorial.en.md); API reference lives on
 - **护栏（guardrails）**：输入/输出 tripwire 语义，内建长度与模式拒绝，fail-closed
 - **可观测**：slog 生命周期钩子、全量审计日志、追踪挂点（`tracing.Tracer`）
 - **韧性**：统一错误分类 + 重试 / 超时 / 限流 / 降级中间件
+- **内置安全工具**：`shell` / `read_file` 跑在 Landlock 沙箱（Linux，fail-closed + 能力自报）里，写仅限工作区、禁网、deny 规则、超时杀树
 - **类型化错误体系**：`*model.ModelError` 统一分类，`errors.As` 可解
 - **测试友好**：脚本化假模型（同步/流式）+ opt-in soak 长压测试
 
 ## 要求
 
 - Go **1.25+**
-- 生产依赖仅两个：官方 [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)（MCP）与
-  [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite，无 CGO）。
+- 生产依赖仅三个：官方 [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)（MCP）、
+  [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite，无 CGO）与
+  [`golang.org/x/sys`](https://pkg.go.dev/golang.org/x/sys)（沙箱原语）。
   核心包 `model` / `tool` / `agent` / `tracing` 只用标准库。
 
 ## 5 分钟上手
@@ -88,6 +91,7 @@ go run .
 | 接入 MCP 服务器 | [第 10 课：接入 MCP](docs/tutorial.md#10-接入-mcp-服务器) |
 | 重试 / 超时 / 限流 / 降级 | [第 11 课：韧性](docs/tutorial.md#11-韧性重试超时限流降级) |
 | 测试你的智能体 | [第 12 课：测试](docs/tutorial.md#12-测试你的智能体) |
+| 沙箱里执行命令、读文件 | [第 13 课：内置安全工具](docs/tutorial.md#13-内置安全工具sandbox) |
 
 英文版教程：[docs/tutorial.en.md](docs/tutorial.en.md)。
 
@@ -115,6 +119,7 @@ go run .
 | 护栏 + 审计 / 生命周期钩子 / 追踪 | ✅ |
 | MCP（stdio / streamable-http）+ 按工具授权 | ✅ |
 | 韧性中间件（重试 / 超时 / 限流 / 降级） | ✅ |
+| 内置安全工具（Landlock 沙箱 shell / 只读文件工具） | ✅（Linux 全量；Windows/macOS 进程树兜底） |
 | Soak 长压测试（opt-in） | ✅ |
 | 更多 provider 适配器、示例与教程扩充 | 持续进行 |
 
