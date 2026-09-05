@@ -9,6 +9,7 @@ go build ./...        # compile
 make check            # vet + test + race + build (same gates as CI)
 make cover            # coverage report over library packages
 make bench            # benchmarks
+make soak             # opt-in sustained-load tests (set SOAK_ITERS, default off)
 go run ./examples/offline   # offline end-to-end smoke test
 ```
 

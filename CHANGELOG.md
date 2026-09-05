@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-05
+
 ### Added
 
 - Core agent loop (`agent.Agent` / `agent.Runner`) with reflection-based
@@ -47,3 +49,45 @@ project adheres to [Semantic Versioning](https://semver.org/).
   agent, tolerates Markdown code fences, and decodes the final answer into
   `TypedResult.Value`; decode failures return a typed
   `*agent.StructuredOutputError` carrying the raw model text.
+- Input/output guardrails with tripwire semantics (`Agent.InputGuardrails`
+  run concurrently before the first model call; `Agent.OutputGuardrails`
+  run on the final agent's result before it is published). Trips fail the
+  run with a typed `*agent.GuardrailTripwireError`; guardrail errors are
+  fail-closed. Built-ins live in the `guardrail` package (`DenyPatterns`,
+  `MaxLength`).
+- Full-content audit logging (`audit.NewSlog`): a hooks implementation
+  recording raw inputs, complete model messages, tool arguments and
+  results, guardrail verdicts, handoffs and usage with `run_id`
+  correlation — the compliance counterpart of the privacy-preserving
+  `agent.SlogHooks`.
+- `agent.MultiHooks` fan-out combiner and the optional `agent.GuardrailHook`
+  extension, so operational logs and audit logs can share one Runner.
+- Session persistence (`agent.Session` interface with `GetItems` / `AddItems`
+  / `Clear` and `Runner.RunWithSession` / `RunStreamWithSession`): history is
+  loaded before the run, instructions are prepended, and the run's new
+  messages are written back only on success — failed runs never persist, and
+  writeback failures fail the run. Implementations in the `session` package:
+  `NewInMemory`, `NewFile` (JSONL), and `NewSQLiteStore` (single DB file
+  holding many keyed sessions via `store.Get(id)`, powered by the pure-Go
+  `modernc.org/sqlite` driver).
+- History compression (`agent.HistoryCompressor` + `Runner.Compressor`):
+  applied to the request view only — session storage stays lossless and
+  `res.Messages` reflects the compressed view. `session.NewSlidingWindow(n)`
+  truncates; `session.Summarizer{Model, High, Low}` folds older messages into
+  a rolling summary with hysteresis and an incremental-fold cache, so model
+  calls scale as (len−High)/(High−Low) instead of once per turn.
+- Soak test suite (`soak/soak_test.go`): opt-in sustained-load scenarios
+  (agent loops, streaming, concurrent sessions, summarizer compression)
+  gated by `SOAK_ITERS`, with goroutine / heap / fd leak checks
+  (`make soak`, `make soak-race`).
+
+### Documentation
+
+- Restructured the README as a lean entry point: bilingual intro, one
+  complete runnable quick-start, a capability-to-lesson index linking into
+  the tutorial, and a compact status table. Architecture details, per-file
+  descriptions and internal milestone notes were removed in favor of
+  pkg.go.dev and the new tutorial.
+- Added a step-by-step bilingual tutorial: `docs/tutorial.md` (Chinese) and
+  `docs/tutorial.en.md` (English mirror) — 12 lessons plus architecture and
+  openai-agents-python difference appendices.

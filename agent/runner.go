@@ -39,6 +39,10 @@ type Runner struct {
 	// MaxToolOutputBytes truncates tool results fed back to the model
 	// (default 512 KiB).
 	MaxToolOutputBytes int
+	// Compressor shrinks the loaded history before it is sent to the model
+	// (view-level only; sessions still store the full transcript); nil
+	// means no compression.
+	Compressor HistoryCompressor
 }
 
 // NewRunner returns a Runner with default settings.
@@ -76,22 +80,13 @@ type RunResult struct {
 
 // Run starts a fresh conversation with a and sends it input.
 func (r *Runner) Run(ctx context.Context, a *Agent, input string) (*RunResult, error) {
-	var history []model.Message
-	if a.Instructions != "" {
-		history = append(history, model.Message{Role: model.RoleSystem, Content: a.Instructions})
-	}
-	return r.run(ctx, a, history, input)
+	return r.run(ctx, a, withInstructions(a, nil), input, nil)
 }
 
 // RunWithHistory continues an existing conversation (e.g. the Messages slice
 // from a previous RunResult) with a new user input.
 func (r *Runner) RunWithHistory(ctx context.Context, a *Agent, history []model.Message, input string) (*RunResult, error) {
-	msgs := make([]model.Message, 0, len(history)+1)
-	msgs = append(msgs, history...)
-	if a.Instructions != "" && (len(msgs) == 0 || msgs[0].Role != model.RoleSystem) {
-		msgs = append([]model.Message{{Role: model.RoleSystem, Content: a.Instructions}}, msgs...)
-	}
-	return r.run(ctx, a, msgs, input)
+	return r.run(ctx, a, withInstructions(a, history), input, nil)
 }
 
 type runOpts struct {
@@ -102,7 +97,7 @@ type runOpts struct {
 	tracer      tracing.Tracer
 }
 
-func (r *Runner) run(ctx context.Context, a *Agent, history []model.Message, input string) (*RunResult, error) {
+func (r *Runner) run(ctx context.Context, a *Agent, history []model.Message, input string, sess Session) (*RunResult, error) {
 	if a.Model == nil {
 		return nil, errors.New("agent: agent has no model configured")
 	}
@@ -113,11 +108,18 @@ func (r *Runner) run(ctx context.Context, a *Agent, history []model.Message, inp
 	span.Set("agent", a.Name)
 	ctx = hooks.OnRunStart(spanCtx, a, opts.runID, input)
 
-	started := time.Now()
-	res, err := r.loop(ctx, a, history, input, opts)
-	if res != nil {
-		res.Duration = time.Since(started)
-		res.RunID = opts.runID
+	history, cerr := r.compressHistory(ctx, opts, history)
+	var res *RunResult
+	var err error
+	if cerr != nil {
+		err = cerr
+	} else {
+		started := time.Now()
+		res, err = r.loop(ctx, a, history, input, opts, sess)
+		if res != nil {
+			res.Duration = time.Since(started)
+			res.RunID = opts.runID
+		}
 	}
 	hooks.OnRunEnd(ctx, a, opts.runID, res, err)
 	span.End(err)
@@ -145,7 +147,7 @@ func (r *Runner) runOpts() runOpts {
 	return opts
 }
 
-func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts) (*RunResult, error) {
+func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts, sess Session) (*RunResult, error) {
 	hooks := r.hooks()
 
 	msgs := make([]model.Message, 0, len(history)+1)
@@ -160,6 +162,11 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 		return nil, err
 	}
 	settings := settingsFor(cur)
+
+	// Input guardrails gate the run before any model call.
+	if err := runInputGuardrails(ctx, a, input, hooks, opts.tracer, opts.runID); err != nil {
+		return nil, err
+	}
 
 	var toolErrs []*ToolError
 	var usage model.Usage
@@ -187,7 +194,7 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 		msg := resp.Message
 		if len(msg.ToolCalls) == 0 {
 			msgs = append(msgs, msg)
-			return &RunResult{
+			res := &RunResult{
 				Output:       msg.Content,
 				FinalMessage: msg,
 				Messages:     msgs,
@@ -195,7 +202,18 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 				Usage:        usage,
 				Agent:        cur,
 				Transfers:    transfers,
-			}, nil
+			}
+			// Output guardrails gate the result before it is published; the
+			// final agent's guardrails apply. On success the new messages
+			// (user input plus everything generated) are persisted to the
+			// session; a writeback failure fails the run.
+			if err := runOutputGuardrails(ctx, cur, res, hooks, opts.tracer, opts.runID); err != nil {
+				return nil, err
+			}
+			if err := persistTurn(ctx, sess, res, len(history)); err != nil {
+				return nil, err
+			}
+			return res, nil
 		}
 
 		// Assistant message requesting tool calls, then one result per call.

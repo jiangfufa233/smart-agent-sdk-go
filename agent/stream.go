@@ -91,25 +91,16 @@ func (sr *StreamRun) Wait() (*RunResult, error) {
 // model.StreamModel, the run falls back to non-streaming model calls and
 // reports each full answer as a single StreamTextDelta.
 func (r *Runner) RunStream(ctx context.Context, a *Agent, input string) *StreamRun {
-	var history []model.Message
-	if a.Instructions != "" {
-		history = append(history, model.Message{Role: model.RoleSystem, Content: a.Instructions})
-	}
-	return r.runStreamAsync(ctx, a, history, input)
+	return r.runStreamAsync(ctx, a, withInstructions(a, nil), input, nil)
 }
 
 // RunStreamWithHistory continues an existing conversation while streaming
 // events, mirroring RunWithHistory.
 func (r *Runner) RunStreamWithHistory(ctx context.Context, a *Agent, history []model.Message, input string) *StreamRun {
-	msgs := make([]model.Message, 0, len(history)+1)
-	msgs = append(msgs, history...)
-	if a.Instructions != "" && (len(msgs) == 0 || msgs[0].Role != model.RoleSystem) {
-		msgs = append([]model.Message{{Role: model.RoleSystem, Content: a.Instructions}}, msgs...)
-	}
-	return r.runStreamAsync(ctx, a, msgs, input)
+	return r.runStreamAsync(ctx, a, withInstructions(a, history), input, nil)
 }
 
-func (r *Runner) runStreamAsync(ctx context.Context, a *Agent, history []model.Message, input string) *StreamRun {
+func (r *Runner) runStreamAsync(ctx context.Context, a *Agent, history []model.Message, input string, sess Session) *StreamRun {
 	ch := make(chan StreamEvent, streamEventBuffer)
 	done := make(chan struct{})
 	sr := &StreamRun{Events: ch, done: done}
@@ -118,13 +109,13 @@ func (r *Runner) runStreamAsync(ctx context.Context, a *Agent, history []model.M
 		// channel and then an already-published result.
 		defer close(done)
 		defer close(ch)
-		res, err := r.runStream(ctx, a, history, input, ch)
+		res, err := r.runStream(ctx, a, history, input, ch, sess)
 		sr.res, sr.err = res, err
 	}()
 	return sr
 }
 
-func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Message, input string, ch chan<- StreamEvent) (*RunResult, error) {
+func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Message, input string, ch chan<- StreamEvent, sess Session) (*RunResult, error) {
 	if a.Model == nil {
 		err := errors.New("agent: agent has no model configured")
 		ch <- StreamEvent{Type: StreamRunError, Err: err, Agent: a.Name}
@@ -139,11 +130,18 @@ func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Messag
 
 	sendEvent(ctx, ch, StreamEvent{Type: StreamRunStarted, RunID: opts.runID, Agent: a.Name})
 
-	started := time.Now()
-	res, err := r.streamLoop(ctx, a, history, input, opts, ch)
-	if res != nil {
-		res.Duration = time.Since(started)
-		res.RunID = opts.runID
+	history, cerr := r.compressHistory(ctx, opts, history)
+	var res *RunResult
+	var err error
+	if cerr != nil {
+		err = cerr
+	} else {
+		started := time.Now()
+		res, err = r.streamLoop(ctx, a, history, input, opts, ch, sess)
+		if res != nil {
+			res.Duration = time.Since(started)
+			res.RunID = opts.runID
+		}
 	}
 	hooks.OnRunEnd(ctx, a, opts.runID, res, err)
 	span.End(err)
@@ -155,7 +153,7 @@ func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Messag
 	return res, err
 }
 
-func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts, ch chan<- StreamEvent) (*RunResult, error) {
+func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts, ch chan<- StreamEvent, sess Session) (*RunResult, error) {
 	hooks := r.hooks()
 
 	msgs := make([]model.Message, 0, len(history)+1)
@@ -171,6 +169,12 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 		return nil, err
 	}
 	settings := settingsFor(cur)
+
+	// Input guardrails gate the run before any model call, so a tripwire
+	// fails the run before any event but StreamRunStarted is emitted.
+	if err := runInputGuardrails(ctx, a, input, hooks, opts.tracer, opts.runID); err != nil {
+		return nil, err
+	}
 
 	var toolErrs []*ToolError
 	var usage model.Usage
@@ -209,6 +213,18 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 				Usage:        usage,
 				Agent:        cur,
 				Transfers:    transfers,
+			}
+			// Output guardrails gate the result before StreamFinalOutput is
+			// emitted; a trip fails the run instead. Text deltas may already
+			// have been consumed — StreamRunError is authoritative. On
+			// success the new messages are persisted to the session before
+			// the terminal event, so a writeback failure still yields exactly
+			// one terminal event (StreamRunError).
+			if err := runOutputGuardrails(ctx, cur, res, hooks, opts.tracer, opts.runID); err != nil {
+				return nil, err
+			}
+			if err := persistTurn(ctx, sess, res, len(history)); err != nil {
+				return nil, err
 			}
 			ch <- StreamEvent{
 				Type:         StreamFinalOutput,

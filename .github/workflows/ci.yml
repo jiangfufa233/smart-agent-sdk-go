@@ -24,7 +24,7 @@ jobs:
 
       - name: Test (race + coverage)
         # Examples are excluded: coverage is gated on library packages.
-        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/...
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./agent/... ./model/... ./tool/... ./tracing/... ./handoff/... ./skill/... ./mcp/... ./testutil/... ./audit/... ./guardrail/... ./session/...
 
       - name: Coverage gate
         run: |

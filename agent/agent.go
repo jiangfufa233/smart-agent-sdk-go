@@ -27,4 +27,12 @@ type Agent struct {
 	// Settings carries optional sampling parameters merged into every
 	// request (temperature, tool_choice, response_format, ...).
 	Settings *model.Settings
+	// InputGuardrails run once per Run on the user input before the first
+	// model call, concurrently; a tripwire fails the run without any model
+	// call.
+	InputGuardrails []InputGuardrail
+	// OutputGuardrails run once on the final output, using the guardrails of
+	// the agent that produced it; a tripwire fails the run before the result
+	// is returned.
+	OutputGuardrails []OutputGuardrail
 }

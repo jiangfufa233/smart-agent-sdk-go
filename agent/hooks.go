@@ -35,6 +35,79 @@ type HandoffHook interface {
 	OnHandoff(ctx context.Context, from, to *Agent, runID string)
 }
 
+// GuardrailHook is an optional extension of Hooks for guardrail evaluations.
+// A Hooks implementation that also implements this interface receives a
+// verdict for every guardrail that runs; implementations that do not are
+// unaffected.
+type GuardrailHook interface {
+	Hooks
+	// OnGuardrail is called after each guardrail evaluation; err is non-nil
+	// when the guardrail itself failed.
+	OnGuardrail(ctx context.Context, a *Agent, runID string, stage GuardrailStage, name string, res GuardrailResult, err error, elapsed time.Duration)
+}
+
+// MultiHooks fans every lifecycle event out to each Hooks value in order. It
+// is the way to run several hooks — e.g. SlogHooks and an audit logger — on
+// one Runner. Optional extension interfaces (HandoffHook, GuardrailHook) are
+// probed per element, so combining plain and extended implementations works
+// as expected.
+func MultiHooks(hooks ...Hooks) Hooks { return multiHooks(hooks) }
+
+type multiHooks []Hooks
+
+func (m multiHooks) OnRunStart(ctx context.Context, a *Agent, runID, input string) context.Context {
+	for _, h := range m {
+		ctx = h.OnRunStart(ctx, a, runID, input)
+	}
+	return ctx
+}
+
+func (m multiHooks) OnRunEnd(ctx context.Context, a *Agent, runID string, res *RunResult, err error) {
+	for _, h := range m {
+		h.OnRunEnd(ctx, a, runID, res, err)
+	}
+}
+
+func (m multiHooks) OnLLMCall(ctx context.Context, a *Agent, runID string, turn int, req *model.Request) {
+	for _, h := range m {
+		h.OnLLMCall(ctx, a, runID, turn, req)
+	}
+}
+
+func (m multiHooks) OnLLMResponse(ctx context.Context, a *Agent, runID string, turn int, resp *model.Response, err error, elapsed time.Duration) {
+	for _, h := range m {
+		h.OnLLMResponse(ctx, a, runID, turn, resp, err, elapsed)
+	}
+}
+
+func (m multiHooks) OnToolCall(ctx context.Context, a *Agent, runID string, name, args string) {
+	for _, h := range m {
+		h.OnToolCall(ctx, a, runID, name, args)
+	}
+}
+
+func (m multiHooks) OnToolResult(ctx context.Context, a *Agent, runID string, name, result string, err error, elapsed time.Duration) {
+	for _, h := range m {
+		h.OnToolResult(ctx, a, runID, name, result, err, elapsed)
+	}
+}
+
+func (m multiHooks) OnHandoff(ctx context.Context, from, to *Agent, runID string) {
+	for _, h := range m {
+		if hh, ok := h.(HandoffHook); ok {
+			hh.OnHandoff(ctx, from, to, runID)
+		}
+	}
+}
+
+func (m multiHooks) OnGuardrail(ctx context.Context, a *Agent, runID string, stage GuardrailStage, name string, res GuardrailResult, err error, elapsed time.Duration) {
+	for _, h := range m {
+		if gh, ok := h.(GuardrailHook); ok {
+			gh.OnGuardrail(ctx, a, runID, stage, name, res, err, elapsed)
+		}
+	}
+}
+
 // NopHooks is the default no-op implementation.
 var NopHooks Hooks = nopHooks{}
 
@@ -111,4 +184,16 @@ func (s slogHooks) OnToolResult(ctx context.Context, a *Agent, runID string, nam
 
 func (s slogHooks) OnHandoff(ctx context.Context, from, to *Agent, runID string) {
 	s.l.Info("agent handoff", "from", from.name(), "to", to.name(), "run_id", runID)
+}
+
+func (s slogHooks) OnGuardrail(ctx context.Context, a *Agent, runID string, stage GuardrailStage, name string, res GuardrailResult, err error, elapsed time.Duration) {
+	if err != nil {
+		s.l.Warn("guardrail failed", "agent", a.Name, "run_id", runID, "stage", string(stage), "guardrail", name, "error", err, "elapsed_ms", elapsed.Milliseconds())
+		return
+	}
+	if res.Tripwire {
+		s.l.Warn("guardrail tripwire", "agent", a.Name, "run_id", runID, "stage", string(stage), "guardrail", name, "info", res.Info)
+		return
+	}
+	s.l.Debug("guardrail pass", "agent", a.Name, "run_id", runID, "stage", string(stage), "guardrail", name, "elapsed_ms", elapsed.Milliseconds())
 }

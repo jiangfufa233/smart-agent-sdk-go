@@ -1,7 +1,8 @@
 // Command offline demonstrates the full agent loop without any network access
 // by using the scripted fake models from the testutil package. It doubles as
 // a smoke test for the SDK: schema generation, the tool-call loop, handoffs
-// (both patterns), structured output, skills and streaming.
+// (both patterns), structured output, skills, streaming, guardrails, audit
+// logging, session persistence and history compression.
 //
 // Usage:
 //
@@ -10,12 +11,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/audit"
+	"github.com/jiangfufa233/smart-agent-sdk-go/guardrail"
 	"github.com/jiangfufa233/smart-agent-sdk-go/handoff"
 	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/session"
 	"github.com/jiangfufa233/smart-agent-sdk-go/skill"
 	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
 	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
@@ -145,6 +153,99 @@ func main() {
 	if _, err := run.Result(); err != nil {
 		must(err)
 	}
+
+	// 8. Guardrails: tripwires fail the run. An input tripwire fires before
+	// any model call — the scripted model below is never reached.
+	guarded := &agent.Agent{
+		Name:  "guarded",
+		Model: testutil.NewScripted(testutil.TextStep("this must never be reached")),
+		InputGuardrails: []agent.InputGuardrail{
+			guardrail.DenyPatterns("secrets",
+				regexp.MustCompile(`sk-[A-Za-z0-9]{20,}`),
+				regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)),
+			guardrail.MaxLength(500),
+		},
+	}
+	if _, err := agent.NewRunner().Run(ctx, guarded, "my API key is sk-abcdefghij01234567890"); err == nil {
+		fmt.Fprintln(os.Stderr, "error: expected the input guardrail to trip")
+		os.Exit(1)
+	} else {
+		var trip *agent.GuardrailTripwireError
+		if !errors.As(err, &trip) {
+			must(err)
+		}
+		fmt.Printf("guardrail> %s guardrail %q tripped, info=%v\n", trip.Stage, trip.Guardrail, trip.Info)
+	}
+
+	// A clean run with output guardrails and the full-content audit log on
+	// stdout. Combine with agent.SlogHooks via agent.MultiHooks if you also
+	// want the privacy-preserving operational log.
+	audited := &agent.Agent{
+		Name:  "audited",
+		Model: testutil.NewScripted(testutil.TextStep("Here is the safe answer.")),
+		OutputGuardrails: []agent.OutputGuardrail{{
+			Name: "no-placeholders",
+			Guardrail: func(ctx context.Context, a *agent.Agent, r *agent.RunResult) (agent.GuardrailResult, error) {
+				if strings.Contains(r.Output, "TODO") {
+					return agent.GuardrailResult{Tripwire: true, Info: "unfinished output"}, nil
+				}
+				return agent.GuardrailResult{}, nil
+			},
+		}},
+	}
+	auditRunner := &agent.Runner{Hooks: audit.NewSlog(slog.New(slog.NewJSONHandler(os.Stdout, nil)))}
+	res3, err := auditRunner.Run(ctx, audited, "Say something safe.")
+	must(err)
+	fmt.Println("audit> output:", res3.Output)
+
+	// 9. Sessions: pass a Session instead of res.Messages — the history is
+	// loaded before the run and the new messages are written back after it
+	// succeeds. The system prompt is never stored.
+	chat := &agent.Agent{
+		Name:         "chat",
+		Instructions: "You are a helpful assistant.",
+		Model:        chatModel{},
+	}
+	sess := session.NewInMemory()
+	sessionRunner := agent.NewRunner()
+	if _, err := sessionRunner.RunWithSession(ctx, chat, sess, "first hello"); err != nil {
+		must(err)
+	}
+	res4, err := sessionRunner.RunWithSession(ctx, chat, sess, "second hello")
+	must(err)
+	fmt.Println("session>", res4.Output)
+
+	// History compression is view-level: the session stays lossless, the
+	// model sees less. A SlidingWindow keeps the system prompt plus the
+	// most recent messages; a Summarizer folds the old tail into a rolling
+	// summary (one model call per fold, with hysteresis in between).
+	items, err := sess.GetItems(ctx, 0)
+	must(err)
+	fmt.Println("session items stored:", len(items))
+
+	compressing := agent.NewRunner()
+	compressing.Compressor = session.NewSlidingWindow(4)
+	if _, err := compressing.RunWithSession(ctx, chat, sess, "third hello"); err != nil {
+		must(err)
+	}
+	sum := session.NewSummarizer(testutil.NewScripted(testutil.TextStep("The user greeted the assistant.")))
+	sum.High, sum.Low = 4, 2
+	compressing.Compressor = sum
+	if _, err := compressing.RunWithSession(ctx, chat, sess, "summarize me"); err != nil {
+		must(err)
+	}
+	items, err = sess.GetItems(ctx, 0)
+	must(err)
+	fmt.Println("session items after compression runs:", len(items), "(storage stays lossless)")
+}
+
+// chatModel answers every call with a description of what it received,
+// which makes the session and compression effects visible in the output.
+type chatModel struct{}
+
+func (chatModel) Chat(ctx context.Context, req *model.Request) (*model.Response, error) {
+	return testutil.TextStep(fmt.Sprintf("you sent %d message(s), last: %q",
+		len(req.Messages), req.Messages[len(req.Messages)-1].Content)).Resp, nil
 }
 
 func must(err error) {
