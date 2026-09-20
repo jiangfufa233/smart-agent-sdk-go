@@ -80,6 +80,7 @@ func main() {
     })
 
     myAgent := &agent.Agent{
+        ID:           "assistant",
         Name:         "assistant",
         Instructions: "你是一个简洁的中文助手。",
         Model:        m,
@@ -143,14 +144,31 @@ res, err := r.RunWithSession(ctx, myAgent, sess, "我叫什么？最喜欢什么
 fmt.Println(res.Output) // 模型看得到上一轮
 ```
 
-**三种存储**，接口相同（`GetItems` / `AddItems` / `Clear`）：
+**三种存储**，接口相同（`List` / `Append` / `Replace` / `Clear`）：
 
 ```go
-sess := session.NewInMemory()               // 进程内，重启即失
-sess = session.NewFile("chat.jsonl")        // JSONL 追加式，重启后可续聊
-store, err := session.NewSQLiteStore("chats.db") // 单个 DB 文件承载多个会话
-sess = store.Get("user-42")                 // keyed 视图，不同 id 互不可见
+var sess agent.Session = session.NewInMemory()
+sess = session.NewFile("chat.jsonl") // 带版本和 item ID 的 JSONL，原子重写
+store, err := session.NewSQLiteStore("chats.db")
+if err != nil { panic(err) }
+defer store.Close()
+sess = store.Get("user-42")
 ```
+
+`List(ctx, limit)` 按时间顺序返回最近的条目，`limit <= 0` 返回全部。`Append` 与 `Replace` 返回新生成的 `SessionItem{ID, Message}`，存储 ID 与模型的 `ToolCall.ID` / `ToolCallID` 相互独立。
+
+```go
+items, err := sess.List(ctx, 0)
+if err != nil { panic(err) }
+if len(items) >= 4 {
+    replacement, err := sess.Replace(ctx, items[0].ID, items[3].ID,
+        []model.Message{{Role: model.RoleUser, Content: "前四条历史的摘要"}})
+    if err != nil { panic(err) }
+    fmt.Println("新条目 ID:", replacement[0].ID)
+}
+```
+
+`Replace` 物理替换闭区间，传 `nil` 可删除；范围外 ID 不变。未知或反序 ID 返回 `*agent.SessionRangeError`，不修改存储。它与下面的视图压缩不同：被替换的原文不再保留。JSONL 和 SQLite 的旧 v1 格式返回 `*session.FormatUpgradeError`，必须显式迁移，不能直接混读。
 
 **语义要点**（值得花 30 秒读一遍，都是排过坑的）：
 - run **成功后**才把本轮新消息（user 输入 + 生成的 assistant/tool 消息）回写进 session；**失败的 run 不落盘**——不会把半截对话留给下一轮。
@@ -159,7 +177,7 @@ sess = store.Get("user-42")                 // keyed 视图，不同 id 互不�
 - session 存的是**全量无损**历史；发给模型的视图可以压缩（第 3 课）。
 - 转交产生的对话记录原样入 session（转交后的会话可以继续聊，见第 7 课）。
 
-**常见坑**：`NewSQLiteStore` 的 DB 文件可以被多个进程共享（内置 busy_timeout 与 WAL），但它是单文件语义，不要当网络数据库用。
+**常见坑**：`NewSQLiteStore` 的 DB 文件可以被多个进程共享（内置 busy_timeout、WAL 和 immediate 写事务），但它是单文件语义，不要当网络数据库用。`FileSession` 的互斥锁只保护同一实例；同一 JSONL 文件请复用一个 handle，多进程并发写请用 SQLite。存储操作原子不代表整个 load/run/persist 周期原子，同一会话的多轮 run 仍应由应用串行化。
 
 ## 3. 长对话压缩
 
@@ -186,6 +204,30 @@ r := &agent.Runner{Compressor: sum}
 - 摘要缓存绑定在 `Summarizer` 实例上：**复用同一个 Runner 就是复用缓存**；新建 Runner 会从头重新摘要。
 - `High−Low` 差值越大，摘要调用越省，但每次折叠的内容越多、摘要越粗。50/20 是稳妥起点。
 - 压缩只改视图，audit（第 9 课）记录的是压缩后的请求视图，session 里永远是全量原文。
+
+### 离线 token 计数与手工压缩
+
+```go
+counter, err := tokenizer.NewCL100K()
+if err != nil { panic(err) }
+textTokens, err := counter.CountText("cl100k_base", "你好，世界！")
+if err != nil { panic(err) }
+items, err := sess.List(ctx, 0)
+if err != nil { panic(err) }
+messages := make([]model.Message, len(items))
+for i, item := range items { messages[i] = item.Message }
+estimate, err := counter.CountMessages("gpt-4-0613", messages)
+if err != nil { panic(err) }
+fmt.Println(textTokens, estimate)
+```
+
+`tokenizer` 是独立可选包，导入路径为 `github.com/jiangfufa233/smart-agent-sdk-go/tokenizer`。词表内嵌，启动不下载；实例可并发复用。`model.TokenCounter` 可替换为内部 provider 的实现。SDK 不按估算自动改写历史，也不把本地计数写进 provider `Usage`。
+
+- `CountText` 对有效 UTF-8 使用 cl100k_base BPE；特殊 token 外观的字符串按普通文本计数，非法 UTF-8 返回 `tokenizer.ErrInvalidUTF8`。
+- `CountMessages` 支持 `gpt-3.5-turbo` 的 0301/0613/1106/0125、16k-0613，以及 `gpt-4` / `gpt-4-32k` 的 0314/0613 快照。别名 `gpt-3.5-turbo`、`gpt-4` 分别采用 0125、0613 规则。不支持的名称（包括 GPT-4o）返回 `model.ErrUnsupportedTokenModel`；裸 `cl100k_base` 没有消息封装规则，只能用于 `CountText`。
+- 消息估算包含 role、name、文本、工具 ID/类型/名称/原始参数/结果；有 `Parts` 时忽略 `Content`，`Extra` 按实际紧凑 JSON 计数。普通消息增加 3 个封装 token，name 增加 1 个，0301 分别为 4 和 −1；回复前缀增加 3 个。每个工具调用和内容 part 再增加 3 个**本地估算** token，并非 provider 的计费规则。
+- 图片/音频处理、工具定义、隐藏 reasoning 与服务端特殊封装不在这个消息接口的精确计数范围。水位条应预留余量；需要计费数字时使用响应中的 `Usage`。
+- 许可证与词表来源见 `tokenizer/NOTICE`；Go 测试离线校验 886 条由官方 tiktoken 0.12.0 生成的文本向量。
 
 ## 4. 函数工具
 
@@ -241,8 +283,13 @@ for ev := range run.Events {
         fmt.Print(ev.Text)
     case agent.StreamToolCallStarted, agent.StreamToolCallArgs, agent.StreamToolResult:
         // 工具调用的实时过程（ev.Call / ev.Result / ev.ToolErr）
+    case agent.StreamReasoningDelta:
+        // 仅可观测的 reasoning；不会进入输出、session 或工具 transcript
+        fmt.Print(ev.Reasoning)
     case agent.StreamHandoff:
-        fmt.Printf("\n[转交 %s -> %s]\n", ev.FromAgent, ev.ToAgent)
+        fmt.Printf("\n[转交 %s -> %s]\n", ev.From.Name, ev.To.Name)
+    case agent.StreamTaskStarted, agent.StreamTaskCompleted, agent.StreamTaskFailed:
+        // 隔离 child task 生命周期；ev.Agent / ev.Task 用于 UI 关联
     case agent.StreamFinalOutput: // 终态：全文 + 用量
         fmt.Printf("\n[完成，%d tokens]\n", ev.Usage.TotalTokens)
     case agent.StreamRunError: // 终态：失败
@@ -252,7 +299,7 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
-事件类型全集：`StreamRunStarted` / `StreamTextDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamToolResult` / `StreamHandoff` / `StreamFinalOutput` / `StreamRunError`。
+事件类型全集：`StreamRunStarted` / `StreamTaskStarted` / `StreamTextDelta` / `StreamReasoningDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamToolResult` / `StreamHandoff` / `StreamTaskCompleted` / `StreamTaskFailed` / `StreamTaskSkipped` / `StreamFinalOutput` / `StreamRunError`。
 
 **要点**：
 - **终态事件恰好一个**：`StreamFinalOutput` 或 `StreamRunError`，随后 channel 关闭。两种正确消费姿势：range 到关闭，或 `run.Wait()`（自动排干并返回结果）。
@@ -298,11 +345,13 @@ fmt.Printf("%s %.1f°C 晴=%v\n", typed.Value.City, typed.Value.TempC, typed.Val
 
 ```go
 researcher := &agent.Agent{
+    ID:           "researcher",
     Name:         "researcher",
     Instructions: "你是研究专员，负责深入检索并给出结构化结论。",
     Model:        m,
 }
 triage := &agent.Agent{
+    ID:           "triage",
     Name:         "triage",
     Instructions: "你是分诊台：简单问题直接答；需要调研的转交 researcher。",
     Model:        m,
@@ -314,23 +363,53 @@ fmt.Println(res.Transfers)   // [researcher]
 fmt.Println(res.Agent.Name)  // researcher——最终回答由它产出
 ```
 
-**嵌套委托（agent-as-tool）**：子任务独立成一次 run，只有最终答案交回上级：
+**隔离委托（Delegate）**：子任务独立成一次 run；上级保留控制权，子任务的最终答案作为工具结果回填。流式时，子任务的文本、reasoning 与工具事件会以独立 `TaskRef` 转发到根事件流：
 
 ```go
-subTool, err := handoff.AsTool(researcher, agent.NewRunner())
+subTool, err := handoff.Delegate(researcher, agent.NewRunner())
 triage.Tools = append(triage.Tools, subTool)
 ```
 
 | 需求 | 用哪个 |
 |------|--------|
 | 对话要**接管**（用户继续跟新智能体聊） | Handoff |
-| 只要**子任务结果**（上级拿着结果继续说话） | AsTool |
+| 只要**子任务结果**（上级拿着结果继续说话） | Delegate |
 
 **要点**：
-- 目标智能体必须有 `Model`（转交校验会拦下 nil）；转交工具与普通工具重名会报错。
-- `MaxTurns` 约束**所有**智能体的模型调用总数，防止 A↔B 互相踢皮球。
-- 流式下转交有 `StreamHandoff` 事件（`FromAgent`/`ToAgent`）；实现可选的 `agent.HandoffHook` 也能在回调里收到。
-- 转交后的 transcript 原样进 session（第 2 课），对话可以在新智能体名下继续。
+- 每个智能体都必须有稳定 `ID`、展示用 `Name` 和 `Model`；工具与 handoff 重名会报错。
+- 一等转交共享当前 run 的 `MaxTurns`；隔离委托使用传入 child runner 的独立预算、transcript 和 session。
+- 流式转交发出 `StreamHandoff`（`From`/`To`）；隔离委托发出 `StreamTaskStarted`、子事件和 `StreamTaskCompleted`/`StreamTaskFailed`。所有事件都带 `AgentRef` 与 `TaskRef`，根流只有一个终态。
+- 一等转交后的 transcript 原样进 session（第 2 课）；隔离委托不会混入 child 私有 transcript。
+
+### 工作流编排（workflow 包）
+
+**什么时候需要**：任务图由**你的代码**静态决定——先并行调研与统计，再把结果汇总成报告——而不是让模型自己决定下一步。handoff/Delegate 把调度权交给模型；`workflow` 把调度权留给你。
+
+```go
+wf := workflow.NewRunner(agent.NewRunner())
+
+plan := workflow.Parallel(2,
+    workflow.Task{ID: "research", Agent: researcher, Input: "调研 Go 泛型实践"},
+    workflow.Task{ID: "stats", Agent: statsAgent, Input: "收集采用率数据"},
+)
+plan.Tasks = append(plan.Tasks, workflow.Task{
+    ID: "report", Agent: writer, DependsOn: []string{"research", "stats"},
+    BuildInput: func(ctx context.Context, res workflow.Results) (string, error) {
+        return "综合以下材料写报告：\n" + res["research"].Result.Output + "\n" + res["stats"].Result.Output, nil
+    },
+})
+
+res, err := wf.Run(ctx, plan).Wait() // 只要结果；实时观测则 range run.Events
+fmt.Println(res.Tasks["report"].Result.Output)
+```
+
+顺序计划用 `workflow.Sequence(a, b, c)`（自动按声明序串依赖）；任意 DAG 直接构造 `Plan{Tasks: ..., MaxParallel: n}` 并手写 `DependsOn`。
+
+**要点**：
+- `Task{ID, Agent, Input, DependsOn, BuildInput, Session}`；自依赖、重复依赖、未知依赖和环都在 `Run` 时校验报错。`BuildInput` 在调度循环中同步调用（拿到的是其依赖任务的完成快照），应遵循 ctx、快速返回，返回错误即该任务失败。
+- 每个任务是一次独立 agent run：`run.Events` 收到带 `TaskID/ParentTaskID/RootRunID` 的 `StreamTaskStarted/Completed/Failed/Skipped` 与子任务事件转发，根流恰一个终态；`Wait()` 会排空事件通道后返回聚合结果，只关心结果就用它。
+- 失败语义：默认 `Continue`——失败任务的下游标 `Skipped`（`TaskResult.Skipped`），无关节点照常执行；`workflow.FailFast` 在首个失败时取消整个计划（在跑任务收到取消、pending 任务标 `Skipped`，取消原因成为 `Wait` 的 err）。`run.Cancel(cause)` 可随时手动取消，语义相同。
+- 会话：`Task.Session` 提供任务私有历史；同一 Session 只能出现在有依赖关系的任务之间（无依赖的并发共享会被 `Run` 拒绝），有依赖时按 DAG 串行。
 
 ## 8. 护栏（Guardrails）
 
@@ -449,10 +528,30 @@ c, err := mcp.NewClient(mcp.Config{
 })
 ```
 
+**带认证的远程服务**：HTTP 头支持严格模板 `{username}`、`{group}`、`${token}`，值由 `HeaderProvider` 在**每次请求时**提供（token 轮换即刻生效，无需重连）：
+
+```go
+c, err := mcp.NewClient(mcp.Config{
+    Transport: mcp.TransportHTTP,
+    URL:       "https://mcp.example.com/mcp",
+    HTTPHeaders: http.Header{
+        "Authorization": {"Bearer ${token}"},
+        "X-Acting-User": {"{username}"},
+    },
+    HeaderProvider: func(ctx context.Context) (mcp.HeaderValues, error) {
+        return mcp.HeaderValues{Username: "alice", Token: refreshToken(ctx)}, // 你的凭据逻辑
+    },
+})
+```
+
+企业 OAuth 场景改用 `OAuthHandler`（透传官方 go-sdk，自动处理 401/403 重试）；它与手工 `Authorization` 头互斥，同时配置会被 `NewClient` 拒绝。
+
 **语义要点**：
 - 远端工具的 inputSchema 原样透传给模型；结果展平为文本（二进制以尺寸占位）；服务端报 `IsError` 时映射为工具错误回填给模型。
 - `Config.Policy` 对**每次**远端调用做授权（复用 `tool.Policy`）：拒绝时不发请求，拒绝原因回填给模型。要人工审批就实现自定义 `Policy`（回调里弹确认框/等审批系统）。
 - 权限拒绝不会让 run 失败——它进 `res.ToolErrors`，模型会收到"被拒绝及原因"。
+- 模板变量是严格白名单：未知变量在 `NewClient` 即报错；provider 返回空值会让请求失败（凭据不完整不发送），provider 的错误信息不会出现在结果里（可能含渲染后的密钥）。
+- 动态凭据不会跟随重定向发往其他域：跨-origin 请求会被拒绝。
 
 ## 11. 韧性（重试、超时、限流、降级）
 
@@ -520,6 +619,7 @@ m := testutil.NewScripted(
 )
 
 res, err := agent.NewRunner().Run(ctx, &agent.Agent{
+    ID: "weather-test", Name: "Weather Test",
     Model: m, Tools: []tool.Tool{weatherTool},
 }, "北京天气？")
 // res.Output == "done"
@@ -539,7 +639,7 @@ sm := testutil.NewScriptedStream(testutil.StreamStep{
     FinishReason: "stop",
 })
 // sm 同时实现 model.Model 与 model.StreamModel
-run := agent.NewRunner().RunStream(ctx, &agent.Agent{Model: sm}, "hi")
+run := agent.NewRunner().RunStream(ctx, &agent.Agent{ID: "stream-test", Name: "Stream Test", Model: sm}, "hi")
 res, err := run.Wait()
 ```
 
@@ -572,6 +672,7 @@ reader, err := builtins.NewFileTool(builtins.FileConfig{
 })
 
 a := &agent.Agent{
+    ID:    "ops",
     Name:  "ops",
     Model: model, // 任意 model.Model
     Tools: []tool.Tool{shell, reader},
@@ -587,17 +688,19 @@ _, err := shell.Run(ctx, `{"command":"rm -rf /data"}`)
 // err: tool "shell" denied by policy: command matches deny rule "..."
 ```
 
-第二层是审批：用第 4 课的 `tool.WithPolicy` 包装，人类在环时同步阻塞等待决定：
+第二层是审批：用 `tool.RequireApproval` 包装；`Approver` 在模型请求工具后、工具执行前同步阻塞等待决定。它收到工具名、描述和原始 JSON 参数，可关联外部 UI 或队列：
 
 ```go
-approved := tool.WithPolicy(shell, tool.PolicyFunc(func(ctx context.Context, call tool.ToolCall) error {
-    var args struct{ Command string `json:"command"` }
-    json.Unmarshal([]byte(call.Arguments), &args)
-    return askHuman(ctx, args.Command) // nil 放行，error 拒绝
-}))
+approved := tool.WithPolicy(shell, tool.RequireApproval(
+    tool.ApproverFunc(func(ctx context.Context, req tool.ApprovalRequest) (bool, error) {
+        return waitForHumanDecision(ctx, req) // allow、deny 或 ctx 取消
+    }),
+    "shell", // 仅 shell 要求审批；省略则拦截所有工具
+))
 ```
 
 **要点**：
+- **审批是同步阻塞 + fail-closed**：`Approver` 返回错误、拒绝、缺 approver 或 ctx 取消都按拒绝处理；批准返回时 ctx 已取消同样视为拒绝（不会执行）。
 - **fail-closed 贯穿始终**：`sandbox.Auto` 在 Landlock 不可用的内核上直接报错（Linux ≥ 5.13；禁网需要 ≥ 6.7 的 ABI v4）；`NewShellTool` 沙箱缺失直接拒绝注册。只有显式传 `Config.Lax=true` 才降级，且降级后 `sb.Capabilities()` 如实自报哪些限制真实生效。
 - **沙箱是安全边界，deny 规则只是护栏**：规则挡"显而易见的错误"，绕过很容易（`rm` 换名字）；真正的防线是 Landlock——工作区外写、任意网络都被内核拒绝，逃逸测试矩阵（读 `/etc`、软链逃逸、拨号、超时杀树）在 CI 里持续验证。
 - **防不住提示注入诱导的合法操作**：模型被诱导在工作区内写恶意文件，沙箱不拦——这类威胁要靠 `WithPolicy` 审批 + 审计兜底。

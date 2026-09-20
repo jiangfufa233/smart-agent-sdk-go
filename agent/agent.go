@@ -10,7 +10,11 @@ import (
 // Agent is a configurable unit that answers instructions using a model and
 // an optional set of tools.
 type Agent struct {
-	// Name identifies the agent (used in handoffs and logs).
+	// ID is the stable machine identifier used to correlate stream events,
+	// handoffs, and workflow tasks. It must be non-empty when a run starts.
+	ID string
+	// Name is the human-readable display name shown in events and logs. It must
+	// be non-empty when a run starts.
 	Name string
 	// Instructions is the system prompt guiding the agent's behavior.
 	Instructions string

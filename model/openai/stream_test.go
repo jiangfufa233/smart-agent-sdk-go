@@ -67,6 +67,10 @@ func requireEvents(t *testing.T, got []model.StreamEvent, want []model.StreamEve
 			if got[i].Text != want[i].Text {
 				t.Errorf("event %d text = %q, want %q", i, got[i].Text, want[i].Text)
 			}
+		case model.StreamReasoningDelta:
+			if got[i].Reasoning != want[i].Reasoning {
+				t.Errorf("event %d reasoning = %q, want %q", i, got[i].Reasoning, want[i].Reasoning)
+			}
 		case model.StreamToolCallDelta:
 			if got[i].ToolCall != want[i].ToolCall {
 				t.Errorf("event %d tool call = %+v, want %+v", i, got[i].ToolCall, want[i].ToolCall)
@@ -110,6 +114,30 @@ func TestChatStreamTextDeltas(t *testing.T) {
 	}
 }
 
+func TestChatStreamReasoningDeltas(t *testing.T) {
+	ts := sseServer(t,
+		chunkJSON("cmpl-r", `{"reasoning_content":"plan"}`, ""),
+		chunkJSON("cmpl-r", `{"reasoning":" carefully","content":"answer"}`, "stop"),
+		"data: [DONE]\n\n",
+	)
+	defer ts.Close()
+	c := New(Config{BaseURL: ts.URL, DefaultModel: "gpt-test"})
+	sr, err := c.ChatStream(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := drainStream(t, sr)
+	if err := sr.Err(); err != nil {
+		t.Fatal(err)
+	}
+	requireEvents(t, evs, []model.StreamEvent{
+		{Type: model.StreamReasoningDelta, Reasoning: "plan"},
+		{Type: model.StreamReasoningDelta, Reasoning: " carefully"},
+		{Type: model.StreamTextDelta, Text: "answer"},
+		{Type: model.StreamFinish, FinishReason: "stop", ID: "cmpl-r"},
+	})
+}
+
 func TestChatStreamSendsStreamOptions(t *testing.T) {
 	var seen map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +179,33 @@ func TestChatStreamDisableStreamUsage(t *testing.T) {
 	if _, ok := seen["stream_options"]; ok {
 		t.Errorf("stream_options should be omitted: %v", seen)
 	}
+}
+
+func TestResponsesStreamNormalization(t *testing.T) {
+	ts := sseServer(t,
+		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n",
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n",
+		"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_r\",\"name\":\"lookup\"}}\n\n",
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"q\\\":\\\"x\\\"}\"}\n\n",
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_s\",\"model\":\"gpt-responses\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\"}],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n",
+	)
+	defer ts.Close()
+	c := New(Config{BaseURL: ts.URL, DefaultModel: "gpt-responses", Protocol: ProtocolResponses})
+	sr, err := c.ChatStream(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := drainStream(t, sr)
+	if err := sr.Err(); err != nil {
+		t.Fatal(err)
+	}
+	requireEvents(t, evs, []model.StreamEvent{
+		{Type: model.StreamReasoningDelta, Reasoning: "plan"},
+		{Type: model.StreamTextDelta, Text: "answer"},
+		{Type: model.StreamToolCallDelta, ToolCall: model.ToolCall{ID: "call_r", Type: "function", Index: 1, Function: model.FunctionCall{Name: "lookup"}}},
+		{Type: model.StreamToolCallDelta, ToolCall: model.ToolCall{ID: "call_r", Type: "function", Index: 1, Function: model.FunctionCall{Name: "lookup", Arguments: `{"q":"x"}`}}},
+		{Type: model.StreamFinish, FinishReason: "tool_calls", Usage: model.Usage{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5}, ID: "resp_s"},
+	})
 }
 
 func TestChatStreamToolCallDeltas(t *testing.T) {

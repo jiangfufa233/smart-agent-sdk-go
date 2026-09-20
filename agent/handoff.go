@@ -100,6 +100,8 @@ func buildAgentRegs(a *Agent) (*agentRegs, error) {
 		switch {
 		case h.Target == nil:
 			return nil, fmt.Errorf("agent: handoff[%d] of agent %q has no target", i, a.name())
+		case validateAgentIdentity(h.Target) != nil:
+			return nil, fmt.Errorf("agent: handoff target %q has invalid identity", h.Target.name())
 		case h.Target.Model == nil:
 			return nil, fmt.Errorf("agent: handoff target %q has no model configured", h.Target.name())
 		}

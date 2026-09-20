@@ -28,6 +28,7 @@ import (
 	"github.com/jiangfufa233/smart-agent-sdk-go/session"
 	"github.com/jiangfufa233/smart-agent-sdk-go/skill"
 	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
+	"github.com/jiangfufa233/smart-agent-sdk-go/tokenizer"
 	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
 
@@ -59,6 +60,7 @@ func main() {
 		}},
 	)
 	a := &agent.Agent{
+		ID:           "weather-agent",
 		Name:         "weather-agent",
 		Instructions: "You are a helpful assistant.",
 		Model:        weatherModel,
@@ -74,8 +76,8 @@ func main() {
 		in := req.Messages[len(req.Messages)-1].Content
 		return testutil.TextStep("researcher handled: " + in).Resp, nil
 	}})
-	sub := &agent.Agent{Name: "researcher", Model: researcherModel}
-	ht, err := handoff.AsTool(sub, nil)
+	sub := &agent.Agent{ID: "researcher", Name: "researcher", Model: researcherModel}
+	ht, err := handoff.Delegate(sub, nil)
 	must(err)
 	out, err := ht.Run(ctx, `{"message":"look this up"}`)
 	must(err)
@@ -84,6 +86,7 @@ func main() {
 	// 4. First-class handoff: a transfer_to_* tool call continues the run
 	// with the target agent in the same conversation.
 	specialist := &agent.Agent{
+		ID:           "research-specialist",
 		Name:         "Research Specialist",
 		Instructions: "You are a research specialist.",
 		Model: testutil.NewScripted(testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
@@ -94,6 +97,7 @@ func main() {
 		}}),
 	}
 	supervisor := &agent.Agent{
+		ID:           "supervisor",
 		Name:         "supervisor",
 		Instructions: "You route research questions.",
 		Model: testutil.NewScripted(
@@ -114,6 +118,7 @@ func main() {
 	}
 	typed, err := agent.RunTyped[weatherReport](ctx, agent.NewRunner(),
 		&agent.Agent{
+			ID:    "structured",
 			Name:  "structured",
 			Model: testutil.NewScripted(testutil.TextStep("```json\n{\"city\":\"Beijing\",\"temperature\":21}\n```")),
 		}, "weather in Beijing?")
@@ -141,7 +146,7 @@ func main() {
 		FinishReason: "stop",
 		Usage:        model.Usage{PromptTokens: 4, CompletionTokens: 3, TotalTokens: 7},
 	})
-	run := agent.NewRunner().RunStream(ctx, &agent.Agent{Name: "streamer", Model: streamModel}, "Greet the world.")
+	run := agent.NewRunner().RunStream(ctx, &agent.Agent{ID: "streamer", Name: "streamer", Model: streamModel}, "Greet the world.")
 	for ev := range run.Events {
 		switch ev.Type {
 		case agent.StreamTextDelta:
@@ -159,6 +164,7 @@ func main() {
 	// 8. Guardrails: tripwires fail the run. An input tripwire fires before
 	// any model call — the scripted model below is never reached.
 	guarded := &agent.Agent{
+		ID:    "guarded",
 		Name:  "guarded",
 		Model: testutil.NewScripted(testutil.TextStep("this must never be reached")),
 		InputGuardrails: []agent.InputGuardrail{
@@ -183,6 +189,7 @@ func main() {
 	// stdout. Combine with agent.SlogHooks via agent.MultiHooks if you also
 	// want the privacy-preserving operational log.
 	audited := &agent.Agent{
+		ID:    "audited",
 		Name:  "audited",
 		Model: testutil.NewScripted(testutil.TextStep("Here is the safe answer.")),
 		OutputGuardrails: []agent.OutputGuardrail{{
@@ -204,6 +211,7 @@ func main() {
 	// loaded before the run and the new messages are written back after it
 	// succeeds. The system prompt is never stored.
 	chat := &agent.Agent{
+		ID:           "chat",
 		Name:         "chat",
 		Instructions: "You are a helpful assistant.",
 		Model:        chatModel{},
@@ -221,7 +229,7 @@ func main() {
 	// model sees less. A SlidingWindow keeps the system prompt plus the
 	// most recent messages; a Summarizer folds the old tail into a rolling
 	// summary (one model call per fold, with hysteresis in between).
-	items, err := sess.GetItems(ctx, 0)
+	items, err := sess.List(ctx, 0)
 	must(err)
 	fmt.Println("session items stored:", len(items))
 
@@ -236,9 +244,26 @@ func main() {
 	if _, err := compressing.RunWithSession(ctx, chat, sess, "summarize me"); err != nil {
 		must(err)
 	}
-	items, err = sess.GetItems(ctx, 0)
+	items, err = sess.List(ctx, 0)
 	must(err)
 	fmt.Println("session items after compression runs:", len(items), "(storage stays lossless)")
+	replaced, err := sess.Replace(ctx, items[0].ID, items[3].ID,
+		[]model.Message{{Role: model.RoleUser, Content: "Summary: the user greeted twice."}})
+	must(err)
+	fmt.Println("session rewritten summary ID:", replaced[0].ID)
+	counter, err := tokenizer.NewCL100K()
+	must(err)
+	textTokens, err := counter.CountText("cl100k_base", "hello world")
+	must(err)
+	items, err = sess.List(ctx, 0)
+	must(err)
+	messages := make([]model.Message, len(items))
+	for i, item := range items {
+		messages[i] = item.Message
+	}
+	messageTokens, err := counter.CountMessages("gpt-4-0613", messages)
+	must(err)
+	fmt.Printf("tokenizer> text=%d, local history estimate=%d (not provider usage)\n", textTokens, messageTokens)
 
 	// 10. Sandboxed built-in tools: the shell and read-only file tools run
 	// every command under a Landlock-confined sandbox — writes limited to
@@ -257,6 +282,7 @@ func main() {
 	fileTool, err := builtins.NewFileTool(builtins.FileConfig{Roots: []string{workspace}})
 	must(err)
 	sandboxAgent := &agent.Agent{
+		ID:           "sandboxed",
 		Name:         "sandboxed",
 		Instructions: "Work strictly inside the workspace.",
 		Model: testutil.NewScripted(

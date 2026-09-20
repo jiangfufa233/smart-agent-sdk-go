@@ -31,7 +31,7 @@ func TestRunTypedInjectsSchema(t *testing.T) {
 		}
 		return testutil.TextStep(`{"city":"SF","temperature":21}`).Resp, nil
 	}})
-	a := &Agent{Name: "structured", Model: m}
+	a := &Agent{ID: "structured", Name: "structured", Model: m}
 	res, err := RunTyped[reportArgs](context.Background(), NewRunner(), a, "weather?")
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestRunTypedInjectsSchema(t *testing.T) {
 
 func TestRunTypedPreservesSettings(t *testing.T) {
 	temp := 0.3
-	a := &Agent{Name: "x", Model: testutil.NewScripted(testutil.TextStep(`{"city":"SF","temperature":1}`))}
+	a := &Agent{ID: "x", Name: "x", Model: testutil.NewScripted(testutil.TextStep(`{"city":"SF","temperature":1}`))}
 	a.Settings = &model.Settings{Temperature: &temp}
 	res, err := RunTyped[reportArgs](context.Background(), NewRunner(), a, "x")
 	if err != nil {
@@ -72,7 +72,7 @@ func TestRunTypedKeepsExistingFormat(t *testing.T) {
 		}
 		return testutil.TextStep(`{"city":"SF","temperature":2}`).Resp, nil
 	}})
-	a := &Agent{Name: "x", Model: m}
+	a := &Agent{ID: "x", Name: "x", Model: m}
 	a.Settings = &model.Settings{ResponseFormat: &model.ResponseFormat{Type: model.FormatJSONObject}}
 	if _, err := RunTyped[reportArgs](context.Background(), NewRunner(), a, "x"); err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestRunTypedKeepsExistingFormat(t *testing.T) {
 
 func TestRunTypedStripsFence(t *testing.T) {
 	res, err := RunTyped[reportArgs](context.Background(), NewRunner(),
-		&Agent{Name: "x", Model: testutil.NewScripted(testutil.TextStep("```json\n{\"city\":\"SF\",\"temperature\":21}\n```"))}, "x")
+		&Agent{ID: "x", Name: "x", Model: testutil.NewScripted(testutil.TextStep("```json\n{\"city\":\"SF\",\"temperature\":21}\n```"))}, "x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestRunTypedStripsFence(t *testing.T) {
 
 func TestRunTypedDecodeError(t *testing.T) {
 	_, err := RunTyped[reportArgs](context.Background(), NewRunner(),
-		&Agent{Name: "x", Model: testutil.NewScripted(testutil.TextStep("no json here"))}, "x")
+		&Agent{ID: "x", Name: "x", Model: testutil.NewScripted(testutil.TextStep("no json here"))}, "x")
 	var se *StructuredOutputError
 	if !errors.As(err, &se) {
 		t.Fatalf("expected *StructuredOutputError, got %v", err)
@@ -103,7 +103,7 @@ func TestRunTypedDecodeError(t *testing.T) {
 }
 
 func TestRunTypedUnsupportedType(t *testing.T) {
-	_, err := RunTyped[chan int](context.Background(), NewRunner(), &Agent{Name: "x", Model: testutil.NewScripted(testutil.TextStep("{}"))}, "x")
+	_, err := RunTyped[chan int](context.Background(), NewRunner(), &Agent{ID: "x", Name: "x", Model: testutil.NewScripted(testutil.TextStep("{}"))}, "x")
 	if err == nil || !strings.Contains(err.Error(), "unsupported type") {
 		t.Fatalf("err = %v", err)
 	}

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,7 +12,7 @@ import (
 	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
 )
 
-// fakeSession records writebacks and can fail loads or writes.
+// fakeSession records whole-turn writebacks and can fail loads or writes.
 type fakeSession struct {
 	mu     sync.Mutex
 	items  []model.Message
@@ -20,26 +21,40 @@ type fakeSession struct {
 	addErr error
 }
 
-func (f *fakeSession) GetItems(ctx context.Context, limit int) ([]model.Message, error) {
+func (f *fakeSession) List(ctx context.Context, limit int) ([]SessionItem, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	msgs := append([]model.Message(nil), f.items...)
-	if limit > 0 && limit < len(msgs) {
-		msgs = msgs[len(msgs)-limit:]
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	messages := append([]model.Message(nil), f.items...)
+	if limit > 0 && limit < len(messages) {
+		messages = messages[len(messages)-limit:]
 	}
-	return msgs, nil
+	items := make([]SessionItem, len(messages))
+	for i, message := range messages {
+		items[i] = SessionItem{ID: fmt.Sprintf("stored-%d", i), Message: message}
+	}
+	return items, nil
 }
 
-func (f *fakeSession) AddItems(ctx context.Context, items []model.Message) error {
+func (f *fakeSession) Append(ctx context.Context, messages []model.Message) ([]SessionItem, error) {
 	if f.addErr != nil {
-		return f.addErr
+		return nil, f.addErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.adds = append(f.adds, append([]model.Message(nil), items...))
-	f.items = append(f.items, items...)
-	return nil
+	f.adds = append(f.adds, append([]model.Message(nil), messages...))
+	items := make([]SessionItem, len(messages))
+	for i, message := range messages {
+		items[i] = SessionItem{ID: fmt.Sprintf("generated-%d", len(f.items)+i), Message: message}
+	}
+	f.items = append(f.items, messages...)
+	return items, nil
+}
+
+func (f *fakeSession) Replace(ctx context.Context, firstID, lastID string, with []model.Message) ([]SessionItem, error) {
+	return nil, nil
 }
 
 func (f *fakeSession) Clear(ctx context.Context) error { return nil }
@@ -61,13 +76,13 @@ func assertMsgs(t *testing.T, got []model.Message, want ...model.Message) {
 func TestRunWithSessionPersistsNewMessages(t *testing.T) {
 	ctx := context.Background()
 	s := &fakeSession{}
-	a := &Agent{Model: testutil.NewScripted(testutil.TextStep("hi there"))}
+	a := &Agent{ID: "session", Name: "session", Model: testutil.NewScripted(testutil.TextStep("hi there"))}
 
 	if _, err := NewRunner().RunWithSession(ctx, a, s, "hello"); err != nil {
 		t.Fatalf("RunWithSession: %v", err)
 	}
 	if len(s.adds) != 1 {
-		t.Fatalf("AddItems called %d times, want 1", len(s.adds))
+		t.Fatalf("Append called %d times, want 1", len(s.adds))
 	}
 	assertMsgs(t, s.adds[0],
 		model.Message{Role: model.RoleUser, Content: "hello"},
@@ -78,8 +93,9 @@ func TestRunWithSessionPersistsNewMessages(t *testing.T) {
 func TestRunWithSessionHandoffTranscript(t *testing.T) {
 	ctx := context.Background()
 	s := &fakeSession{}
-	specialist := &Agent{Name: "specialist", Model: testutil.NewScripted(testutil.TextStep("spec done"))}
+	specialist := &Agent{ID: "specialist", Name: "specialist", Model: testutil.NewScripted(testutil.TextStep("spec done"))}
 	supervisor := &Agent{
+		ID:       "supervisor",
 		Name:     "supervisor",
 		Model:    testutil.NewScripted(testutil.ToolCallStep("t1", "transfer_to_specialist", "{}")),
 		Handoffs: []Handoff{{Target: specialist}},
@@ -109,6 +125,8 @@ func TestRunWithSessionInstructionsNotStored(t *testing.T) {
 	var prompt []model.Message
 	s := &fakeSession{items: []model.Message{{Role: model.RoleUser, Content: "old"}}}
 	a := &Agent{
+		ID:           "session-instructions",
+		Name:         "session-instructions",
 		Instructions: "be nice",
 		Model: testutil.NewScripted(testutil.Step{Func: func(req *model.Request) (*model.Response, error) {
 			prompt = append([]model.Message(nil), req.Messages...)
@@ -161,7 +179,7 @@ func TestCompressorAppliesToRunWithHistory(t *testing.T) {
 	r := NewRunner()
 	r.Compressor = comp
 
-	res, err := r.RunWithHistory(ctx, &Agent{Model: m}, history, "q3")
+	res, err := r.RunWithHistory(ctx, &Agent{ID: "session", Name: "session", Model: m}, history, "q3")
 	if err != nil {
 		t.Fatalf("RunWithHistory: %v", err)
 	}
@@ -196,7 +214,7 @@ func TestCompressorAppliesToSessionRun(t *testing.T) {
 	r := NewRunner()
 	r.Compressor = comp
 
-	if _, err := r.RunWithSession(ctx, &Agent{Model: m}, s, "q3"); err != nil {
+	if _, err := r.RunWithSession(ctx, &Agent{ID: "session", Name: "session", Model: m}, s, "q3"); err != nil {
 		t.Fatalf("RunWithSession: %v", err)
 	}
 	assertMsgs(t, m.LastRequest().Messages,
@@ -209,18 +227,18 @@ func TestCompressorAppliesToSessionRun(t *testing.T) {
 func TestRunWithSessionErrors(t *testing.T) {
 	ctx := context.Background()
 
-	if _, err := NewRunner().RunWithSession(ctx, &Agent{Model: testutil.NewScripted()}, nil, "x"); err == nil ||
+	if _, err := NewRunner().RunWithSession(ctx, &Agent{ID: "session", Name: "session", Model: testutil.NewScripted()}, nil, "x"); err == nil ||
 		!strings.Contains(err.Error(), "session is nil") {
 		t.Fatalf("nil session: got %v", err)
 	}
 
-	_, err := NewRunner().RunWithSession(ctx, &Agent{Model: testutil.NewScripted()},
+	_, err := NewRunner().RunWithSession(ctx, &Agent{ID: "session", Name: "session", Model: testutil.NewScripted()},
 		&fakeSession{getErr: errors.New("disk gone")}, "x")
 	if err == nil || !strings.Contains(err.Error(), "load session") {
 		t.Fatalf("load error: got %v", err)
 	}
 
-	_, err = NewRunner().RunWithSession(ctx, &Agent{Model: testutil.NewScripted(testutil.TextStep("ok"))},
+	_, err = NewRunner().RunWithSession(ctx, &Agent{ID: "session", Name: "session", Model: testutil.NewScripted(testutil.TextStep("ok"))},
 		&fakeSession{addErr: errors.New("disk full")}, "x")
 	if err == nil || !strings.Contains(err.Error(), "persist session") {
 		t.Fatalf("writeback error: got %v", err)
@@ -230,7 +248,7 @@ func TestRunWithSessionErrors(t *testing.T) {
 func TestRunStreamWithSessionWriteback(t *testing.T) {
 	ctx := context.Background()
 	s := &fakeSession{}
-	a := &Agent{Name: "streamer", Model: testutil.NewScriptedStream(testutil.StreamStep{
+	a := &Agent{ID: "streamer", Name: "streamer", Model: testutil.NewScriptedStream(testutil.StreamStep{
 		Deltas:       []model.StreamEvent{testutil.TextChunk("hello!")},
 		FinishReason: "stop",
 	})}
@@ -249,9 +267,17 @@ func TestRunStreamWithSessionWriteback(t *testing.T) {
 }
 
 func TestRunStreamWithSessionLoadErrorSingleTerminal(t *testing.T) {
-	run := NewRunner().RunStreamWithSession(context.Background(),
-		&Agent{Model: testutil.NewScripted()}, &fakeSession{getErr: errors.New("gone")}, "x")
-	types := collectStreamTypes(t, run)
+	task := TaskRef{ID: "task", ParentID: "parent", RootRunID: "root"}
+	ctx := WithTask(t.Context(), task)
+	run := NewRunner().RunStreamWithSession(ctx,
+		&Agent{ID: "session", Name: "session", Model: testutil.NewScripted()}, &fakeSession{getErr: errors.New("gone")}, "x")
+	var types []StreamEventType
+	for event := range run.Events {
+		if event.Task.ID != task.ID || event.Task.ParentID != task.ParentID || event.Task.RootRunID != task.RootRunID || event.Task.SourceRunID == "" {
+			t.Fatalf("session load error lost task identity: %+v", event.Task)
+		}
+		types = append(types, event.Type)
+	}
 	if n := countTerminals(types); n != 1 {
 		t.Fatalf("got %d terminal events, want 1: %v", n, types)
 	}
@@ -262,7 +288,7 @@ func TestRunStreamWithSessionLoadErrorSingleTerminal(t *testing.T) {
 
 func TestRunStreamWithSessionWritebackErrorSingleTerminal(t *testing.T) {
 	run := NewRunner().RunStreamWithSession(context.Background(),
-		&Agent{Model: testutil.NewScriptedStream(testutil.StreamStep{
+		&Agent{ID: "session", Name: "session", Model: testutil.NewScriptedStream(testutil.StreamStep{
 			Deltas:       []model.StreamEvent{testutil.TextChunk("x")},
 			FinishReason: "stop",
 		})},

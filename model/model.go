@@ -185,7 +185,8 @@ type ToolParam struct {
 	Function FunctionDef `json:"function"`
 }
 
-// Usage reports token consumption of a single model call.
+// Usage reports token consumption returned by a provider for a single model
+// call. It must not contain local estimates produced by TokenCounter.
 type Usage struct {
 	PromptTokens            int           `json:"prompt_tokens"`
 	CompletionTokens        int           `json:"completion_tokens"`

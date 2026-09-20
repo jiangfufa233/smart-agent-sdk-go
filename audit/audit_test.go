@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/handoff"
 	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
 	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
@@ -65,6 +66,7 @@ func TestAuditFullRun(t *testing.T) {
 		testutil.TextStep("final answer"),
 	)
 	a := &agent.Agent{
+		ID:    "audited",
 		Name:  "audited",
 		Model: m,
 		Tools: []tool.Tool{search},
@@ -119,7 +121,7 @@ func TestAuditFullRun(t *testing.T) {
 func TestAuditTripwireAndFailure(t *testing.T) {
 	var buf bytes.Buffer
 	lg := NewSlog(slog.New(slog.NewJSONHandler(&buf, nil)))
-	a := &agent.Agent{Model: testutil.NewScripted(testutil.TextStep("unused")),
+	a := &agent.Agent{ID: "audit", Name: "audit", Model: testutil.NewScripted(testutil.TextStep("unused")),
 		InputGuardrails: []agent.InputGuardrail{{Name: "block", Guardrail: func(ctx context.Context, a *agent.Agent, input string) (agent.GuardrailResult, error) {
 			return agent.GuardrailResult{Tripwire: true, Info: "policy X"}, nil
 		}}}}
@@ -155,7 +157,7 @@ func TestAuditToolFailure(t *testing.T) {
 		testutil.ToolCallStep("t1", "search", `{"q":"x"}`),
 		testutil.TextStep("recovered"),
 	)
-	a := &agent.Agent{Name: "a", Model: m, Tools: []tool.Tool{search}}
+	a := &agent.Agent{ID: "a", Name: "a", Model: m, Tools: []tool.Tool{search}}
 	if _, err := (&agent.Runner{Hooks: lg}).Run(context.Background(), a, "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -164,5 +166,51 @@ func TestAuditToolFailure(t *testing.T) {
 	tr := msgOf(recs, "tool_result")
 	if tr == nil || tr["error"] == nil || tr["result"] == "" {
 		t.Fatalf("tool_result = %v, want error and fed-back text", tr)
+	}
+}
+
+func TestAuditDelegationCorrelatesChildRun(t *testing.T) {
+	var buf bytes.Buffer
+	lg := NewSlog(slog.New(slog.NewJSONHandler(&buf, nil)))
+	runner := &agent.Runner{Hooks: lg}
+	child := &agent.Agent{ID: "researcher", Name: "Researcher", Model: testutil.NewScripted(testutil.TextStep("research complete"))}
+	delegated, err := handoff.Delegate(child, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &agent.Agent{
+		ID:   "manager",
+		Name: "Manager",
+		Model: testutil.NewScripted(
+			testutil.ToolCallStep("delegate", delegated.Spec().Function.Name, `{"message":"research"}`),
+			testutil.TextStep("final answer"),
+		),
+		Tools: []tool.Tool{delegated},
+	}
+	if _, err := runner.Run(context.Background(), manager, "investigate"); err != nil {
+		t.Fatal(err)
+	}
+
+	var parent, delegatedChild map[string]any
+	for _, rec := range allMsgs(parseRecords(t, &buf), "run_started") {
+		switch rec["agent"] {
+		case manager.Name:
+			parent = rec
+		case child.Name:
+			delegatedChild = rec
+		}
+	}
+	if parent == nil || delegatedChild == nil {
+		t.Fatalf("run records = %s", buf.String())
+	}
+	parentTask, _ := parent["task_id"].(string)
+	parentRoot, _ := parent["root_run_id"].(string)
+	parentSource, _ := parent["source_run_id"].(string)
+	childTask, _ := delegatedChild["task_id"].(string)
+	childParent, _ := delegatedChild["parent_task_id"].(string)
+	childRoot, _ := delegatedChild["root_run_id"].(string)
+	childSource, _ := delegatedChild["source_run_id"].(string)
+	if parentTask == "" || parentTask != parentRoot || parentTask != parentSource || childTask == "" || childTask == childSource || childParent != parentTask || childRoot != parentRoot || childSource == "" {
+		t.Fatalf("parent=%v child=%v", parent, delegatedChild)
 	}
 }

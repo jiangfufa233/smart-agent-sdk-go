@@ -25,7 +25,7 @@ func TestSlidingWindow(t *testing.T) {
 		if out[0].Role != model.RoleSystem {
 			t.Fatalf("system message dropped: %+v", out[0])
 		}
-		assertContents(t, out, "be terse", "msg-3", "msg-4", "msg-5")
+		assertMessageContents(t, out, "be terse", "msg-3", "msg-4", "msg-5")
 	})
 
 	t.Run("multiple system messages are preserved", func(t *testing.T) {
@@ -35,7 +35,7 @@ func TestSlidingWindow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compress: %v", err)
 		}
-		assertContents(t, out, "be terse", "also sys", "msg-3", "msg-4")
+		assertMessageContents(t, out, "be terse", "also sys", "msg-3", "msg-4")
 	})
 
 	t.Run("short history is returned unchanged", func(t *testing.T) {
@@ -45,7 +45,7 @@ func TestSlidingWindow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compress: %v", err)
 		}
-		assertContents(t, out, "msg-1", "msg-2", "msg-3")
+		assertMessageContents(t, out, "msg-1", "msg-2", "msg-3")
 	})
 
 	t.Run("non-positive keep is rejected", func(t *testing.T) {
@@ -63,7 +63,7 @@ func TestSummarizerBelowThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
-	assertContents(t, out, append([]string{"sys"}, contents(rangeMsgs(10))...)...)
+	assertMessageContents(t, out, append([]string{"sys"}, contents(rangeMsgs(10))...)...)
 }
 
 func TestSummarizerTriggersAndShape(t *testing.T) {
@@ -93,7 +93,7 @@ func TestSummarizerTriggersAndShape(t *testing.T) {
 	if !strings.HasSuffix(out[1].Content, "sum-v1") {
 		t.Fatalf("summary text missing: %q", out[1].Content)
 	}
-	assertContents(t, out[2:], "msg-5", "msg-6")
+	assertMessageContents(t, out[2:], "msg-5", "msg-6")
 
 	// The prompt rendered the folded messages, none of the recent ones.
 	for _, want := range []string{"user: msg-1", "user: msg-2", "user: msg-3", "user: msg-4"} {
@@ -141,7 +141,7 @@ func TestSummarizerRollingCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compress 6: %v", err)
 	}
-	assertContents(t, out, "sys", "Conversation summary:\nsum-1", "msg-5", "msg-6")
+	assertMessageContents(t, out, "sys", "Conversation summary:\nsum-1", "msg-5", "msg-6")
 
 	// +1 growth: below the increment (High-Low), no model call, but the
 	// view stays bounded (summary + unfolded increment + recent).
@@ -149,14 +149,14 @@ func TestSummarizerRollingCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compress 7: %v", err)
 	}
-	assertContents(t, out, "sys", "Conversation summary:\nsum-1", "msg-5", "msg-6", "msg-7")
+	assertMessageContents(t, out, "sys", "Conversation summary:\nsum-1", "msg-5", "msg-6", "msg-7")
 
 	// 2nd: increment reached (m5, m6 folded into the existing summary).
 	out, err = s.Compress(ctx, hist(8))
 	if err != nil {
 		t.Fatalf("compress 8: %v", err)
 	}
-	assertContents(t, out, "sys", "Conversation summary:\nsum-2", "msg-7", "msg-8")
+	assertMessageContents(t, out, "sys", "Conversation summary:\nsum-2", "msg-7", "msg-8")
 	if !strings.Contains(cm.prompts[1], "Previous summary:\nsum-1") {
 		t.Fatalf("incremental prompt must carry the previous summary:\n%s", cm.prompts[1])
 	}
@@ -178,7 +178,7 @@ func TestSummarizerRollingCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compress 9: %v", err)
 	}
-	assertContents(t, out, "sys", "Conversation summary:\nsum-2", "msg-7", "msg-8", "msg-9")
+	assertMessageContents(t, out, "sys", "Conversation summary:\nsum-2", "msg-7", "msg-8", "msg-9")
 
 	// 3rd fold: m7, m8 folded.
 	if _, err := s.Compress(ctx, hist(10)); err != nil {
@@ -215,7 +215,7 @@ func TestSummarizerCacheInvalidatedByNewConversation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compress 2: %v", err)
 	}
-	assertContents(t, out, "sys", "Conversation summary:\nsum-2", "n-5", "n-6")
+	assertMessageContents(t, out, "sys", "Conversation summary:\nsum-2", "n-5", "n-6")
 	if strings.Contains(cm.prompts[1], "Previous summary") {
 		t.Fatalf("stale cache must trigger a full re-summarize:\n%s", cm.prompts[1])
 	}
@@ -245,7 +245,7 @@ func TestSummarizerModelFailureLeavesCacheClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry compress: %v", err)
 	}
-	assertContents(t, out, "sys", "Conversation summary:\nrecovered summary", "msg-5", "msg-6")
+	assertMessageContents(t, out, "sys", "Conversation summary:\nrecovered summary", "msg-5", "msg-6")
 }
 
 func TestSummarizerValidation(t *testing.T) {

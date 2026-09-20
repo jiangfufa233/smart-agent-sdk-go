@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -91,6 +92,7 @@ func (r *Runner) RunWithHistory(ctx context.Context, a *Agent, history []model.M
 
 type runOpts struct {
 	runID       string
+	task        TaskRef
 	maxTurns    int
 	toolTimeout time.Duration
 	maxOutput   int
@@ -98,15 +100,19 @@ type runOpts struct {
 }
 
 func (r *Runner) run(ctx context.Context, a *Agent, history []model.Message, input string, sess Session) (*RunResult, error) {
-	if a.Model == nil {
-		return nil, errors.New("agent: agent has no model configured")
+	return r.runWithOpts(ctx, a, history, input, sess, r.runOptsForContext(ctx))
+}
+
+func (r *Runner) runWithOpts(ctx context.Context, a *Agent, history []model.Message, input string, sess Session, opts runOpts) (*RunResult, error) {
+	if err := validateAgent(a); err != nil {
+		return nil, err
 	}
-	opts := r.runOpts()
 
 	hooks := r.hooks()
 	spanCtx, span := opts.tracer.Start(ctx, "agent.run")
 	span.Set("agent", a.Name)
-	ctx = hooks.OnRunStart(spanCtx, a, opts.runID, input)
+	ctx = hooks.OnRunStart(withTask(spanCtx, opts.task), a, opts.runID, input)
+	ctx = withTask(ctx, opts.task)
 
 	history, cerr := r.compressHistory(ctx, opts, history)
 	var res *RunResult
@@ -144,7 +150,52 @@ func (r *Runner) runOpts() runOpts {
 		opts.tracer = tracing.Nop()
 	}
 	opts.runID = newRunID()
+	opts.task = TaskRef{
+		ID:          opts.runID,
+		RootRunID:   opts.runID,
+		SourceRunID: opts.runID,
+	}
 	return opts
+}
+
+func (r *Runner) runOptsForContext(ctx context.Context) runOpts {
+	opts := r.runOpts()
+	task, ok := TaskFromContext(ctx)
+	if !ok {
+		return opts
+	}
+	if task.ID == "" {
+		task.ID = opts.runID
+	}
+	if task.RootRunID == "" {
+		task.RootRunID = task.ID
+	}
+	task.SourceRunID = opts.runID
+	opts.task = task
+	return opts
+}
+
+func validateAgent(a *Agent) error {
+	if err := validateAgentIdentity(a); err != nil {
+		return err
+	}
+	if a.Model == nil {
+		return errors.New("agent: agent has no model configured")
+	}
+	return nil
+}
+
+func validateAgentIdentity(a *Agent) error {
+	if a == nil {
+		return errors.New("agent: agent is nil")
+	}
+	if strings.TrimSpace(a.ID) == "" {
+		return errors.New("agent: agent ID is required")
+	}
+	if strings.TrimSpace(a.Name) == "" {
+		return errors.New("agent: agent name is required")
+	}
+	return nil
 }
 
 func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts, sess Session) (*RunResult, error) {
@@ -173,6 +224,9 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 	var transfers []string
 
 	for turn := 0; turn < opts.maxTurns; turn++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		req := &model.Request{
 			Model:    cur.ModelName,
 			Messages: msgs,
@@ -294,12 +348,51 @@ func (r *Runner) execTool(ctx context.Context, name, args string, byName map[str
 		defer cancel()
 	}
 
+	if delegated, policy, ok := delegateOf(t); ok {
+		if policy != nil {
+			if err := authorizeDelegation(ctx, policy, delegated, args); err != nil {
+				terr = &ToolError{Tool: name, Arguments: args, Err: err}
+				return fmt.Sprintf("error: tool %q failed: %v", name, err), terr
+			}
+		}
+		return r.execDelegatedTool(ctx, delegated, args, opts)
+	}
 	out, err := t.Run(ctx, args)
 	if err != nil {
 		terr = &ToolError{Tool: name, Arguments: args, Err: err}
 		return fmt.Sprintf("error: tool %q failed: %v", name, err), terr
 	}
 	return truncateOutput(out, opts.maxOutput), nil
+}
+
+func (r *Runner) execStreamTool(ctx context.Context, name, args string, byName map[string]tool.Tool, turn int, opts runOpts, ch chan<- StreamEvent) (result string, terr *ToolError) {
+	t, ok := byName[name]
+	if !ok {
+		return r.execTool(ctx, name, args, byName, opts)
+	}
+	delegated, policy, ok := delegateOf(t)
+	if !ok {
+		return r.execTool(ctx, name, args, byName, opts)
+	}
+	emitCtx := ctx
+	defer func() {
+		if p := recover(); p != nil {
+			terr = &ToolError{Tool: name, Arguments: args, Err: fmt.Errorf("panic: %v", p)}
+			result = "error: tool " + strconv.Quote(name) + " panicked: " + fmt.Sprint(p)
+		}
+	}()
+	if opts.toolTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.toolTimeout)
+		defer cancel()
+	}
+	if policy != nil {
+		if err := authorizeDelegation(ctx, policy, delegated, args); err != nil {
+			terr = &ToolError{Tool: name, Arguments: args, Err: err}
+			return fmt.Sprintf("error: tool %q failed: %v", name, err), terr
+		}
+	}
+	return r.streamDelegatedTool(ctx, emitCtx, delegated, args, turn, opts, ch)
 }
 
 // hooks never returns a nil interface value.

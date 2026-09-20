@@ -36,6 +36,30 @@ func (f PolicyFunc) Authorize(ctx context.Context, call ToolCall) error {
 	return f(ctx, call)
 }
 
+// ApprovalRequest describes a tool call waiting for a human decision.
+type ApprovalRequest struct {
+	// Tool is the requested tool's name.
+	Tool string
+	// Description is the requested tool's description from its spec.
+	Description string
+	// Arguments is the raw JSON argument string produced by the model.
+	Arguments string
+}
+
+// Approver makes a synchronous human approval decision. Approve may block
+// while a decision is pending and must return when ctx is canceled.
+type Approver interface {
+	Approve(ctx context.Context, request ApprovalRequest) (allowed bool, err error)
+}
+
+// ApproverFunc adapts a function to Approver.
+type ApproverFunc func(ctx context.Context, request ApprovalRequest) (allowed bool, err error)
+
+// Approve implements Approver.
+func (f ApproverFunc) Approve(ctx context.Context, request ApprovalRequest) (bool, error) {
+	return f(ctx, request)
+}
+
 // AuthorizationError reports a tool call rejected by a Policy.
 type AuthorizationError struct {
 	// Tool is the denied tool's name.
@@ -86,6 +110,76 @@ func Denylist(names ...string) Policy {
 	})
 }
 
+// RequireApproval requires approver to allow each selected call before it can
+// run. With no tool names, it requires approval for every tool. An approver
+// error, a denial, a missing approver, or a canceled context denies the call.
+func RequireApproval(approver Approver, toolNames ...string) Policy {
+	selected := make(map[string]struct{}, len(toolNames))
+	for _, name := range toolNames {
+		selected[name] = struct{}{}
+	}
+
+	return PolicyFunc(func(ctx context.Context, call ToolCall) error {
+		if len(selected) > 0 {
+			if _, ok := selected[call.Name]; !ok {
+				return nil
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return approvalAuthorizationError(call.Name, err)
+		}
+		if approver == nil {
+			return approvalAuthorizationError(call.Name, errors.New("no approver configured"))
+		}
+
+		allowed, err := approver.Approve(ctx, ApprovalRequest{
+			Tool:        call.Name,
+			Description: call.Description,
+			Arguments:   call.Arguments,
+		})
+		if err != nil {
+			return approvalAuthorizationError(call.Name, err)
+		}
+		if !allowed {
+			return approvalAuthorizationError(call.Name, errors.New("human approval denied"))
+		}
+		// The context may have been canceled while the decision was pending;
+		// an approval that arrives after cancellation does not authorize a run.
+		if err := ctx.Err(); err != nil {
+			return approvalAuthorizationError(call.Name, err)
+		}
+		return nil
+	})
+}
+
+func approvalAuthorizationError(toolName string, err error) error {
+	var authErr *AuthorizationError
+	if errors.As(err, &authErr) {
+		return err
+	}
+	return &AuthorizationError{Tool: toolName, Err: err}
+}
+
+// PerTool selects a policy for each tool name. Overrides replace defaultPolicy
+// for their matching tools. A nil default or nil override allows the call.
+// Overrides are copied so changes to the caller's map do not affect the policy.
+func PerTool(defaultPolicy Policy, overrides map[string]Policy) Policy {
+	byName := make(map[string]Policy, len(overrides))
+	for name, policy := range overrides {
+		byName[name] = policy
+	}
+	return PolicyFunc(func(ctx context.Context, call ToolCall) error {
+		policy, ok := byName[call.Name]
+		if !ok {
+			policy = defaultPolicy
+		}
+		if policy == nil {
+			return nil
+		}
+		return policy.Authorize(ctx, call)
+	})
+}
+
 // WithPolicy guards t with p: every Run consults p.Authorize before
 // executing the tool. A nil p returns t unchanged. Specs pass through
 // unchanged, so the model still sees the tool and can be told why a call
@@ -106,6 +200,14 @@ type guardedTool struct {
 func (g guardedTool) Spec() model.ToolParam {
 	return g.t.Spec()
 }
+
+// Unwrap exposes the guarded tool. Runner uses it to keep recognizing
+// delegated tools behind a guard and to recover the policy for delegation
+// calls that bypass Run.
+func (g guardedTool) Unwrap() Tool { return g.t }
+
+// Policy returns the authorization policy applied by this guard.
+func (g guardedTool) Policy() Policy { return g.p }
 
 // Run implements Tool.
 func (g guardedTool) Run(ctx context.Context, argumentsJSON string) (string, error) {

@@ -38,6 +38,7 @@ func main() {
 	}
 
 	a := &agent.Agent{
+		ID:           "assistant",
 		Name:         "assistant",
 		Instructions: "You are a helpful assistant.",
 		Model: openai.New(openai.Config{

@@ -36,7 +36,7 @@ func tripOutput(name string) OutputGuardrail {
 func TestInputGuardrailTripwire(t *testing.T) {
 	// The script is empty: any model call fails the run with a different
 	// error, proving tripwires fire before the first model call.
-	a := &Agent{Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
 	_, err := NewRunner().Run(context.Background(), a, "hi")
 	var trip *GuardrailTripwireError
 	if !errors.As(err, &trip) {
@@ -68,7 +68,7 @@ func TestInputGuardrailsAllRun(t *testing.T) {
 		mu.Unlock()
 		return GuardrailResult{}, nil
 	}}
-	a := &Agent{Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{first, second}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{first, second}}
 	_, err := NewRunner().Run(context.Background(), a, "x")
 	if !errors.Is(err, ErrGuardrailTripwire) {
 		t.Fatalf("err = %v", err)
@@ -90,7 +90,7 @@ func TestInputGuardrailFailClosed(t *testing.T) {
 	g := InputGuardrail{Name: "mod", Guardrail: func(ctx context.Context, a *Agent, input string) (GuardrailResult, error) {
 		return GuardrailResult{}, sentinel
 	}}
-	a := &Agent{Model: testutil.NewScripted(testutil.TextStep("unused")), InputGuardrails: []InputGuardrail{g}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(testutil.TextStep("unused")), InputGuardrails: []InputGuardrail{g}}
 	_, err := NewRunner().Run(context.Background(), a, "x")
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want wrap of %v", err, sentinel)
@@ -108,7 +108,7 @@ func TestOutputGuardrailTripwire(t *testing.T) {
 	g := OutputGuardrail{Name: "leak", Guardrail: func(ctx context.Context, a *Agent, res *RunResult) (GuardrailResult, error) {
 		return GuardrailResult{Tripwire: true}, nil
 	}}
-	_, err := NewRunner().Run(context.Background(), &Agent{Model: m, OutputGuardrails: []OutputGuardrail{g}}, "hi")
+	_, err := NewRunner().Run(context.Background(), &Agent{ID: "guarded", Name: "guarded", Model: m, OutputGuardrails: []OutputGuardrail{g}}, "hi")
 	var trip *GuardrailTripwireError
 	if !errors.As(err, &trip) {
 		t.Fatalf("err = %v, want *GuardrailTripwireError", err)
@@ -128,7 +128,7 @@ func TestOutputGuardrailSeesResult(t *testing.T) {
 		seen = res
 		return GuardrailResult{}, nil
 	}}
-	a := &Agent{Model: m, OutputGuardrails: []OutputGuardrail{g}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: m, OutputGuardrails: []OutputGuardrail{g}}
 	res, err := NewRunner().Run(context.Background(), a, "hi")
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestInputGuardrailsConcurrent(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		return GuardrailResult{}, nil
 	}}
-	a := &Agent{Model: testutil.NewScripted(testutil.TextStep("ok")), InputGuardrails: []InputGuardrail{sleep, sleep}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(testutil.TextStep("ok")), InputGuardrails: []InputGuardrail{sleep, sleep}}
 	started := time.Now()
 	if _, err := NewRunner().Run(context.Background(), a, "x"); err != nil {
 		t.Fatal(err)
@@ -182,12 +182,12 @@ func TestInputGuardrailsConcurrent(t *testing.T) {
 }
 
 func TestGuardrailValidation(t *testing.T) {
-	a := &Agent{Model: testutil.NewScripted(testutil.TextStep("x")), InputGuardrails: []InputGuardrail{{Name: "no-fn"}}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(testutil.TextStep("x")), InputGuardrails: []InputGuardrail{{Name: "no-fn"}}}
 	_, err := NewRunner().Run(context.Background(), a, "hi")
 	if err == nil || !strings.Contains(err.Error(), `input guardrail "no-fn" has no function configured`) {
 		t.Fatalf("err = %v", err)
 	}
-	b := &Agent{Model: testutil.NewScripted(testutil.TextStep("x")), OutputGuardrails: []OutputGuardrail{{}}}
+	b := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(testutil.TextStep("x")), OutputGuardrails: []OutputGuardrail{{}}}
 	_, err = NewRunner().Run(context.Background(), b, "hi")
 	if err == nil || !strings.Contains(err.Error(), `output guardrail "guardrail" has no function configured`) {
 		t.Fatalf("err = %v", err)
@@ -217,7 +217,7 @@ func (g *guardrailRecorder) OnGuardrail(ctx context.Context, a *Agent, runID str
 func TestGuardrailHookEvents(t *testing.T) {
 	rec := &guardrailRecorder{recorder: &recorder{}}
 	m := testutil.NewScripted(testutil.TextStep("ok"))
-	a := &Agent{Model: m,
+	a := &Agent{ID: "guarded", Name: "guarded", Model: m,
 		InputGuardrails: []InputGuardrail{passInput("in-check")},
 		OutputGuardrails: []OutputGuardrail{{Name: "out-check", Guardrail: func(ctx context.Context, a *Agent, res *RunResult) (GuardrailResult, error) {
 			return GuardrailResult{}, nil
@@ -241,7 +241,7 @@ func TestGuardrailHookEvents(t *testing.T) {
 	}
 
 	rec2 := &guardrailRecorder{recorder: &recorder{}}
-	trip := &Agent{Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
+	trip := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
 	if _, err := (&Runner{Hooks: rec2}).Run(context.Background(), trip, "x"); !errors.Is(err, ErrGuardrailTripwire) {
 		t.Fatalf("err = %v", err)
 	}
@@ -253,7 +253,7 @@ func TestGuardrailHookEvents(t *testing.T) {
 func TestSlogHooksGuardrail(t *testing.T) {
 	var buf bytes.Buffer
 	hooks := SlogHooks(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	a := &Agent{Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
 	if _, err := (&Runner{Hooks: hooks}).Run(context.Background(), a, "x"); !errors.Is(err, ErrGuardrailTripwire) {
 		t.Fatalf("err = %v", err)
 	}
@@ -271,7 +271,7 @@ func TestMultiHooks(t *testing.T) {
 	gr := &guardrailRecorder{recorder: &recorder{}}
 	mh := MultiHooks(plain, hand, gr)
 
-	from, to := &Agent{Name: "a"}, &Agent{Name: "b"}
+	from, to := &Agent{ID: "a", Name: "a"}, &Agent{ID: "b", Name: "b"}
 	mh.(HandoffHook).OnHandoff(context.Background(), from, to, "r1")
 	mh.(GuardrailHook).OnGuardrail(context.Background(), from, "r1", StageInput, "g", GuardrailResult{Tripwire: true}, nil, 0)
 	if len(hand.handoffs) != 1 || hand.handoffs[0] != "a->b" {
@@ -284,7 +284,7 @@ func TestMultiHooks(t *testing.T) {
 	// Integration: a tripping run reaches every hook, while only the
 	// extensions see guardrail and handoff events.
 	plain2, hand2, gr2 := &recorder{}, &handoffRecorder{recorder: &recorder{}}, &guardrailRecorder{recorder: &recorder{}}
-	a := &Agent{Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
+	a := &Agent{ID: "guarded", Name: "guarded", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
 	if _, err := (&Runner{Hooks: MultiHooks(plain2, hand2, gr2)}).Run(context.Background(), a, "x"); !errors.Is(err, ErrGuardrailTripwire) {
 		t.Fatalf("err = %v", err)
 	}
@@ -321,7 +321,7 @@ func countTerminals(types []StreamEventType) int {
 }
 
 func TestStreamInputGuardrailTripwire(t *testing.T) {
-	a := &Agent{Name: "a", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
+	a := &Agent{ID: "a", Name: "a", Model: testutil.NewScripted(), InputGuardrails: []InputGuardrail{tripInput("block")}}
 	run := NewRunner().RunStream(context.Background(), a, "x")
 	types := collectStreamTypes(t, run)
 	want := []StreamEventType{StreamRunStarted, StreamRunError}
@@ -343,7 +343,7 @@ func TestStreamOutputGuardrailTripwire(t *testing.T) {
 		Deltas:       []model.StreamEvent{testutil.TextChunk("he"), testutil.TextChunk("llo")},
 		FinishReason: "stop",
 	})
-	a := &Agent{Name: "a", Model: m, OutputGuardrails: []OutputGuardrail{tripOutput("leak")}}
+	a := &Agent{ID: "a", Name: "a", Model: m, OutputGuardrails: []OutputGuardrail{tripOutput("leak")}}
 	run := NewRunner().RunStream(context.Background(), a, "x")
 	types := collectStreamTypes(t, run)
 	want := []StreamEventType{StreamRunStarted, StreamTextDelta, StreamTextDelta, StreamRunError}
@@ -365,7 +365,7 @@ func TestStreamOutputGuardrailPass(t *testing.T) {
 		Deltas:       []model.StreamEvent{testutil.TextChunk("hello")},
 		FinishReason: "stop",
 	})
-	a := &Agent{Name: "a", Model: m, OutputGuardrails: []OutputGuardrail{{
+	a := &Agent{ID: "a", Name: "a", Model: m, OutputGuardrails: []OutputGuardrail{{
 		Name: "check", Guardrail: func(ctx context.Context, a *Agent, res *RunResult) (GuardrailResult, error) {
 			return GuardrailResult{}, nil
 		},

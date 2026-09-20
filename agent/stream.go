@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,42 +14,105 @@ type StreamEventType string
 
 const (
 	StreamRunStarted       StreamEventType = "run_started"
+	StreamTaskStarted      StreamEventType = "task_started"
 	StreamTextDelta        StreamEventType = "text_delta"
+	StreamReasoningDelta   StreamEventType = "reasoning_delta"
 	StreamToolCallStarted  StreamEventType = "tool_call_started"
 	StreamToolCallArgs     StreamEventType = "tool_call_args"
 	StreamToolCallFinished StreamEventType = "tool_call_finished"
 	StreamToolResult       StreamEventType = "tool_result"
 	StreamHandoff          StreamEventType = "handoff"
+	StreamTaskCompleted    StreamEventType = "task_completed"
+	StreamTaskFailed       StreamEventType = "task_failed"
+	StreamTaskSkipped      StreamEventType = "task_skipped"
 	StreamFinalOutput      StreamEventType = "final_output"
 	StreamRunError         StreamEventType = "run_error"
 )
 
-// StreamEvent is one incremental update from a run.
+// AgentRef identifies an agent in a stream event. ID is a stable machine
+// identifier and Name is a human-readable display name.
+type AgentRef struct {
+	ID   string
+	Name string
+}
+
+// TaskRef correlates an event with a task and its root stream. Standalone runs
+// use the root run ID as both ID and SourceRunID; delegated and workflow tasks
+// replace ID and ParentID while retaining the common RootRunID.
+type TaskRef struct {
+	ID          string
+	ParentID    string
+	RootRunID   string
+	SourceRunID string
+}
+
+type taskContextKey struct{}
+
+// TaskFromContext returns the task correlation for an active run. Hooks can
+// use it to correlate logs across a delegated task tree.
+func TaskFromContext(ctx context.Context) (TaskRef, bool) {
+	task, ok := ctx.Value(taskContextKey{}).(TaskRef)
+	return task, ok
+}
+
+func withTask(ctx context.Context, task TaskRef) context.Context {
+	return context.WithValue(ctx, taskContextKey{}, task)
+}
+
+// WithTask returns a context that requests task correlation for a public
+// Runner entry point. The runner assigns SourceRunID for the new agent run.
+func WithTask(ctx context.Context, task TaskRef) context.Context {
+	return withTask(ctx, task)
+}
+
+// StreamEvent is one incremental update from a run. Every event carries the
+// active agent and task that produced it.
 type StreamEvent struct {
 	Type  StreamEventType
-	RunID string
-	Agent string
+	Agent AgentRef
+	Task  TaskRef
 	Turn  int // zero-based model-call index the event belongs to
-	// Text carries a StreamTextDelta fragment; on StreamFinalOutput it is
-	// the complete output.
+	// Text carries a StreamTextDelta fragment; on StreamFinalOutput it is the
+	// complete visible output.
 	Text string
+	// Reasoning carries a StreamReasoningDelta fragment. It is observable only
+	// and never becomes a model message, tool transcript, session item, or run
+	// output.
+	Reasoning string
 	// Call is the tool call for the tool-call lifecycle events. On
-	// StreamToolCallArgs, Call.Function.Arguments holds only the new
-	// fragment.
+	// StreamToolCallArgs, Call.Function.Arguments holds only the new raw
+	// fragment. It is not guaranteed to be valid JSON until
+	// StreamToolCallFinished.
 	Call model.ToolCall
 	// Result is the tool output fed back to the model (StreamToolResult).
 	Result string
 	// ToolErr is non-nil on StreamToolResult when the tool failed.
 	ToolErr *ToolError
-	// FromAgent and ToAgent are set on StreamHandoff events.
-	FromAgent string
-	ToAgent   string
+	// From and To identify both sides of a StreamHandoff boundary.
+	From AgentRef
+	To   AgentRef
 	// FinishReason is reported on StreamFinalOutput.
 	FinishReason string
-	// Usage is the accumulated run usage, reported on StreamFinalOutput.
+	// Usage is the accumulated provider-reported run usage, reported on
+	// StreamFinalOutput.
 	Usage model.Usage
-	// Err is the terminal failure (StreamRunError).
+	// Err is the terminal failure (StreamRunError) or task failure detail.
 	Err error
+}
+
+func agentRef(a *Agent) AgentRef {
+	if a == nil {
+		return AgentRef{}
+	}
+	return AgentRef{ID: a.ID, Name: a.Name}
+}
+
+func streamEvent(opts runOpts, a *Agent, typ StreamEventType, turn int) StreamEvent {
+	return streamEventWithTask(opts.task, a, typ, turn)
+}
+
+func streamEventWithTask(task TaskRef, a *Agent, typ StreamEventType, turn int) StreamEvent {
+	return StreamEvent{Type: typ, Agent: agentRef(a), Task: task, Turn: turn}
 }
 
 // streamEventBuffer bounds events produced ahead of the consumer. The run
@@ -72,8 +134,8 @@ type StreamRun struct {
 	err  error
 }
 
-// Result blocks until the run ends and reports its outcome. It does not
-// drain Events; consume Events or call Wait to avoid stalling the run.
+// Result blocks until the run ends and reports its outcome. It does not drain
+// Events; consume Events or call Wait to avoid stalling the run.
 func (sr *StreamRun) Result() (*RunResult, error) {
 	<-sr.done
 	return sr.res, sr.err
@@ -94,50 +156,55 @@ func (r *Runner) RunStream(ctx context.Context, a *Agent, input string) *StreamR
 	return r.runStreamAsync(ctx, a, withInstructions(a, nil), input, nil)
 }
 
-// RunStreamWithHistory continues an existing conversation while streaming
-// events, mirroring RunWithHistory.
+// RunStreamWithHistory continues an existing conversation while streaming,
+// mirroring RunWithHistory.
 func (r *Runner) RunStreamWithHistory(ctx context.Context, a *Agent, history []model.Message, input string) *StreamRun {
 	return r.runStreamAsync(ctx, a, withInstructions(a, history), input, nil)
 }
 
 func (r *Runner) runStreamAsync(ctx context.Context, a *Agent, history []model.Message, input string, sess Session) *StreamRun {
+	return r.runStreamAsyncWithOpts(ctx, a, history, input, sess, r.runOptsForContext(ctx))
+}
+
+func (r *Runner) runStreamAsyncWithOpts(ctx context.Context, a *Agent, history []model.Message, input string, sess Session, opts runOpts) *StreamRun {
 	ch := make(chan StreamEvent, streamEventBuffer)
 	done := make(chan struct{})
 	sr := &StreamRun{Events: ch, done: done}
 	go func() {
-		// LIFO: events channel closes before done, so Wait sees a closed
-		// channel and then an already-published result.
 		defer close(done)
 		defer close(ch)
-		res, err := r.runStream(ctx, a, history, input, ch, sess)
+		res, err := r.runStream(ctx, a, history, input, ch, sess, opts)
 		sr.res, sr.err = res, err
 	}()
 	return sr
 }
 
-func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Message, input string, ch chan<- StreamEvent, sess Session) (*RunResult, error) {
-	if a.Model == nil {
-		err := errors.New("agent: agent has no model configured")
-		ch <- StreamEvent{Type: StreamRunError, Err: err, Agent: a.Name}
+func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Message, input string, ch chan<- StreamEvent, sess Session, opts runOpts) (*RunResult, error) {
+	if err := validateAgent(a); err != nil {
+		ev := streamEvent(opts, a, StreamRunError, 0)
+		ev.Err = err
+		ch <- ev
 		return nil, err
 	}
 
-	opts := r.runOpts()
 	hooks := r.hooks()
 	spanCtx, span := opts.tracer.Start(ctx, "agent.run")
 	span.Set("agent", a.Name)
-	ctx = hooks.OnRunStart(spanCtx, a, opts.runID, input)
+	ctx = hooks.OnRunStart(withTask(spanCtx, opts.task), a, opts.runID, input)
+	ctx = withTask(ctx, opts.task)
 
-	sendEvent(ctx, ch, StreamEvent{Type: StreamRunStarted, RunID: opts.runID, Agent: a.Name})
+	sendEvent(ctx, ch, streamEvent(opts, a, StreamRunStarted, 0))
 
 	history, cerr := r.compressHistory(ctx, opts, history)
 	var res *RunResult
+	var active *Agent
 	var err error
 	if cerr != nil {
+		active = a
 		err = cerr
 	} else {
 		started := time.Now()
-		res, err = r.streamLoop(ctx, a, history, input, opts, ch, sess)
+		res, active, err = r.streamLoop(ctx, a, history, input, opts, ch, sess)
 		if res != nil {
 			res.Duration = time.Since(started)
 			res.RunID = opts.runID
@@ -146,34 +213,32 @@ func (r *Runner) runStream(ctx context.Context, a *Agent, history []model.Messag
 	hooks.OnRunEnd(ctx, a, opts.runID, res, err)
 	span.End(err)
 	if err != nil {
-		// Terminal event: sent unconditionally so consumers always see an
-		// outcome; the run has already ended.
-		ch <- StreamEvent{Type: StreamRunError, Err: err, RunID: opts.runID, Agent: a.Name}
+		if active == nil {
+			active = a
+		}
+		ev := streamEvent(opts, active, StreamRunError, 0)
+		ev.Err = err
+		ch <- ev
 	}
 	return res, err
 }
 
-func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts, ch chan<- StreamEvent, sess Session) (*RunResult, error) {
+func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Message, input string, opts runOpts, ch chan<- StreamEvent, sess Session) (*RunResult, *Agent, error) {
 	hooks := r.hooks()
 
 	msgs := make([]model.Message, 0, len(history)+1)
 	msgs = append(msgs, history...)
 	msgs = append(msgs, model.Message{Role: model.RoleUser, Content: input})
 
-	// cur mirrors the handoff semantics of the non-streaming loop: a handoff
-	// tool call swaps the active agent (tool surface, settings and system
-	// prompt) mid-run.
 	cur := a
 	regs, err := buildAgentRegs(cur)
 	if err != nil {
-		return nil, err
+		return nil, cur, err
 	}
 	settings := settingsFor(cur)
 
-	// Input guardrails gate the run before any model call, so a tripwire
-	// fails the run before any event but StreamRunStarted is emitted.
 	if err := runInputGuardrails(ctx, a, input, hooks, opts.tracer, opts.runID); err != nil {
-		return nil, err
+		return nil, cur, err
 	}
 
 	var toolErrs []*ToolError
@@ -181,6 +246,9 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 	var transfers []string
 
 	for turn := 0; turn < opts.maxTurns; turn++ {
+		if err := ctx.Err(); err != nil {
+			return nil, cur, err
+		}
 		req := &model.Request{
 			Model:    cur.ModelName,
 			Messages: msgs,
@@ -199,7 +267,7 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 		hooks.OnLLMResponse(ctx, cur, opts.runID, turn, resp, err, time.Since(t0))
 		callSpan.End(err)
 		if err != nil {
-			return nil, fmt.Errorf("agent: model call failed: %w", err)
+			return nil, cur, fmt.Errorf("agent: model call failed: %w", err)
 		}
 		usage.Accumulate(turnUsage)
 
@@ -214,33 +282,20 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 				Agent:        cur,
 				Transfers:    transfers,
 			}
-			// Output guardrails gate the result before StreamFinalOutput is
-			// emitted; a trip fails the run instead. Text deltas may already
-			// have been consumed — StreamRunError is authoritative. On
-			// success the new messages are persisted to the session before
-			// the terminal event, so a writeback failure still yields exactly
-			// one terminal event (StreamRunError).
 			if err := runOutputGuardrails(ctx, cur, res, hooks, opts.tracer, opts.runID); err != nil {
-				return nil, err
+				return nil, cur, err
 			}
 			if err := persistTurn(ctx, sess, res, len(history)); err != nil {
-				return nil, err
+				return nil, cur, err
 			}
-			ch <- StreamEvent{
-				Type:         StreamFinalOutput,
-				RunID:        opts.runID,
-				Agent:        cur.Name,
-				Turn:         turn,
-				Text:         msg.Content,
-				FinishReason: finishReason,
-				Usage:        usage,
-			}
-			return res, nil
+			ev := streamEvent(opts, cur, StreamFinalOutput, turn)
+			ev.Text = msg.Content
+			ev.FinishReason = finishReason
+			ev.Usage = usage
+			ch <- ev
+			return res, cur, nil
 		}
 
-		// Assistant message requesting tool calls, then one result per call.
-		// Every call must get a result to keep the transcript valid, so a
-		// handoff only takes effect after all of them are recorded.
 		msgs = append(msgs, msg)
 		var next *Agent
 		for _, tc := range msg.ToolCalls {
@@ -253,25 +308,17 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 				if hh, ok := hooks.(HandoffHook); ok {
 					hh.OnHandoff(ctx, cur, h.Target, opts.runID)
 				}
-				if !sendEvent(ctx, ch, StreamEvent{
-					Type:   StreamToolResult,
-					RunID:  opts.runID,
-					Agent:  cur.Name,
-					Turn:   turn,
-					Call:   tc,
-					Result: result,
-				}) {
-					return nil, ctx.Err()
+				ev := streamEvent(opts, cur, StreamToolResult, turn)
+				ev.Call = tc
+				ev.Result = result
+				if !sendEvent(ctx, ch, ev) {
+					return nil, cur, ctx.Err()
 				}
-				if !sendEvent(ctx, ch, StreamEvent{
-					Type:      StreamHandoff,
-					RunID:     opts.runID,
-					Agent:     cur.Name,
-					Turn:      turn,
-					FromAgent: cur.name(),
-					ToAgent:   h.Target.name(),
-				}) {
-					return nil, ctx.Err()
+				ev = streamEvent(opts, cur, StreamHandoff, turn)
+				ev.From = agentRef(cur)
+				ev.To = agentRef(h.Target)
+				if !sendEvent(ctx, ch, ev) {
+					return nil, cur, ctx.Err()
 				}
 				msgs = append(msgs, model.Message{
 					Role:       model.RoleTool,
@@ -286,7 +333,7 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 			toolCtx, toolSpan := opts.tracer.Start(ctx, "tool."+tc.Function.Name)
 			hooks.OnToolCall(toolCtx, cur, opts.runID, tc.Function.Name, tc.Function.Arguments)
 			t1 := time.Now()
-			result, terr := r.execTool(toolCtx, tc.Function.Name, tc.Function.Arguments, regs.tools, opts)
+			result, terr := r.execStreamTool(toolCtx, tc.Function.Name, tc.Function.Arguments, regs.tools, turn, opts, ch)
 			var errOut error
 			if terr != nil {
 				errOut = terr
@@ -294,16 +341,12 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 			}
 			hooks.OnToolResult(toolCtx, cur, opts.runID, tc.Function.Name, result, errOut, time.Since(t1))
 			toolSpan.End(errOut)
-			if !sendEvent(ctx, ch, StreamEvent{
-				Type:    StreamToolResult,
-				RunID:   opts.runID,
-				Agent:   cur.Name,
-				Turn:    turn,
-				Call:    tc,
-				Result:  result,
-				ToolErr: terr,
-			}) {
-				return nil, ctx.Err()
+			ev := streamEvent(opts, cur, StreamToolResult, turn)
+			ev.Call = tc
+			ev.Result = result
+			ev.ToolErr = terr
+			if !sendEvent(ctx, ch, ev) {
+				return nil, cur, ctx.Err()
 			}
 			msgs = append(msgs, model.Message{
 				Role:       model.RoleTool,
@@ -315,14 +358,14 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 		if next != nil {
 			regs, err = buildAgentRegs(next)
 			if err != nil {
-				return nil, fmt.Errorf("agent: switch to agent %q: %w", next.name(), err)
+				return nil, cur, fmt.Errorf("agent: switch to agent %q: %w", next.name(), err)
 			}
 			settings = settingsFor(next)
 			msgs = switchSystemMessage(msgs, next)
 			cur = next
 		}
 	}
-	return nil, &MaxTurnsError{MaxTurns: opts.maxTurns}
+	return nil, cur, &MaxTurnsError{MaxTurns: opts.maxTurns}
 }
 
 // streamTurn performs one model call, streaming when the model supports it
@@ -336,7 +379,9 @@ func (r *Runner) streamTurn(ctx context.Context, a *Agent, req *model.Request, t
 			return msg, usage, "", cerr
 		}
 		if resp.Message.Content != "" {
-			if !sendEvent(ctx, ch, StreamEvent{Type: StreamTextDelta, RunID: opts.runID, Agent: a.Name, Turn: turn, Text: resp.Message.Content}) {
+			ev := streamEvent(opts, a, StreamTextDelta, turn)
+			ev.Text = resp.Message.Content
+			if !sendEvent(ctx, ch, ev) {
 				return msg, usage, "", ctx.Err()
 			}
 		}
@@ -358,19 +403,31 @@ func (r *Runner) streamTurn(ctx context.Context, a *Agent, req *model.Request, t
 		switch ev.Type {
 		case model.StreamTextDelta:
 			text.WriteString(ev.Text)
-			if !sendEvent(ctx, ch, StreamEvent{Type: StreamTextDelta, RunID: opts.runID, Agent: a.Name, Turn: turn, Text: ev.Text}) {
+			out := streamEvent(opts, a, StreamTextDelta, turn)
+			out.Text = ev.Text
+			if !sendEvent(ctx, ch, out) {
+				return msg, usage, "", ctx.Err()
+			}
+		case model.StreamReasoningDelta:
+			out := streamEvent(opts, a, StreamReasoningDelta, turn)
+			out.Reasoning = ev.Reasoning
+			if !sendEvent(ctx, ch, out) {
 				return msg, usage, "", ctx.Err()
 			}
 		case model.StreamToolCallDelta:
 			calls.Add(ev.ToolCall)
 			if !started[ev.ToolCall.Index] {
 				started[ev.ToolCall.Index] = true
-				if !sendEvent(ctx, ch, StreamEvent{Type: StreamToolCallStarted, RunID: opts.runID, Agent: a.Name, Turn: turn, Call: ev.ToolCall}) {
+				out := streamEvent(opts, a, StreamToolCallStarted, turn)
+				out.Call = ev.ToolCall
+				if !sendEvent(ctx, ch, out) {
 					return msg, usage, "", ctx.Err()
 				}
 			}
 			if ev.ToolCall.Function.Arguments != "" {
-				if !sendEvent(ctx, ch, StreamEvent{Type: StreamToolCallArgs, RunID: opts.runID, Agent: a.Name, Turn: turn, Call: ev.ToolCall}) {
+				out := streamEvent(opts, a, StreamToolCallArgs, turn)
+				out.Call = ev.ToolCall
+				if !sendEvent(ctx, ch, out) {
 					return msg, usage, "", ctx.Err()
 				}
 			}
@@ -384,7 +441,9 @@ func (r *Runner) streamTurn(ctx context.Context, a *Agent, req *model.Request, t
 	}
 
 	for _, tc := range calls.Calls() {
-		if !sendEvent(ctx, ch, StreamEvent{Type: StreamToolCallFinished, RunID: opts.runID, Agent: a.Name, Turn: turn, Call: tc}) {
+		out := streamEvent(opts, a, StreamToolCallFinished, turn)
+		out.Call = tc
+		if !sendEvent(ctx, ch, out) {
 			return msg, usage, "", ctx.Err()
 		}
 	}

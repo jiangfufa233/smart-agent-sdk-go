@@ -3,11 +3,13 @@
 **English** — A production-oriented Go SDK for building AI agents, inspired by
 `openai-agents-python`. It provides an agent loop with function tools, MCP
 integration (stdio & streamable-http) with per-tool authorization policies,
-first-class handoffs and agent-as-tool delegation, typed structured output,
-input/output guardrails, audit logging, session persistence with view-level
-history compression, resilience middleware (retry / timeout / rate limit /
-fallback), lifecycle hooks & tracing, incremental SSE streaming, and sandboxed
-built-in tools (kernel-level shell execution and safe file reads). Start with
+first-class handoffs, isolated task delegation, and explicit workflow DAGs,
+typed structured output, synchronous per-tool approval, input/output
+guardrails, audit logging, session persistence with view-level history
+compression, resilience middleware (retry / timeout / rate limit / fallback),
+lifecycle hooks & tracing, structured SSE streaming with reasoning and task
+correlation, and sandboxed built-in tools (kernel-level shell execution and
+safe file reads). Start with
 the [English tutorial](docs/tutorial.en.md); API reference lives on
 [pkg.go.dev](https://pkg.go.dev/github.com/jiangfufa233/smart-agent-sdk-go).
 
@@ -16,12 +18,14 @@ the [English tutorial](docs/tutorial.en.md); API reference lives on
 
 ## 特性
 
-- **智能体循环**：函数工具自动调度、轮次上限、agent-as-tool 子任务委派
-- **多智能体编排**：一等公民 handoff（转交后对话延续）与嵌套委派两种模式
+- **智能体循环**：函数工具自动调度、轮次上限、隔离子任务委派（`handoff.Delegate`）
+- **多智能体编排**：一等公民 handoff、隔离委派与显式 workflow DAG（顺序 / 并行 / 依赖调度）
 - **会话持久化（session persistence）**：内存 / JSONL 文件 / SQLite 三种存储；成功才回写、失败不落盘
-- **历史压缩**：滑动窗口与滚动摘要，视图级压缩、存储无损
+- **历史压缩**：滑动窗口与滚动摘要，视图级压缩、存储无损；也可按 session item ID 显式替换历史区间
+- **本地 token 计数**：可注入 `model.TokenCounter`，可选离线 cl100k_base；估算与 provider Usage 分离
 - **MCP 接入**：stdio 与 streamable-http 传输，按工具授权策略（白/黑名单）
-- **流式输出**：`RunStream` 增量事件流，非流式模型自动降级
+- **人工审批**：按工具同步阻塞审批；allow、deny 与取消都会安全反馈模型
+- **流式输出**：`RunStream` 增量事件流，非流式模型自动降级；reasoning 与 Agent/Task 关联可观测
 - **结构化输出**：`RunTyped[T]` 泛型解码，容错解析
 - **护栏（guardrails）**：输入/输出 tripwire 语义，内建长度与模式拒绝，fail-closed
 - **可观测**：slog 生命周期钩子、全量审计日志、追踪挂点（`tracing.Tracer`）
@@ -33,9 +37,10 @@ the [English tutorial](docs/tutorial.en.md); API reference lives on
 ## 要求
 
 - Go **1.25+**
-- 生产依赖仅三个：官方 [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)（MCP）、
-  [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite，无 CGO）与
-  [`golang.org/x/sys`](https://pkg.go.dev/golang.org/x/sys)（沙箱原语）。
+- 扩展包依赖官方 [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)（MCP）、
+  [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite，无 CGO）、
+  [`golang.org/x/sys`](https://pkg.go.dev/golang.org/x/sys)（沙箱原语），以及可选 `tokenizer` 包的
+  `go-tiktoken`（内嵌 cl100k_base 词表，无运行时下载；许可证见 [NOTICE](tokenizer/NOTICE)）。
   核心包 `model` / `tool` / `agent` / `tracing` 只用标准库。
 
 ## 5 分钟上手
@@ -60,6 +65,8 @@ func main() {
 	})
 
 	res, err := agent.NewRunner().Run(context.Background(), &agent.Agent{
+		ID:           "assistant",
+		Name:         "Assistant",
 		Instructions: "You are a helpful assistant.",
 		Model:        m,
 	}, "用一句话介绍 Go 的 goroutine。")

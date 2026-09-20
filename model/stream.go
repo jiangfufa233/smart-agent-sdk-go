@@ -10,8 +10,12 @@ import (
 type StreamEventType string
 
 const (
-	// StreamTextDelta carries an incremental text fragment in Text.
+	// StreamTextDelta carries an incremental visible-text fragment in Text.
 	StreamTextDelta StreamEventType = "text"
+	// StreamReasoningDelta carries an incremental private reasoning fragment in
+	// Reasoning. It is observable only and must not be persisted in assistant
+	// messages, tool transcripts, or sessions.
+	StreamReasoningDelta StreamEventType = "reasoning"
 	// StreamToolCallDelta carries a partial tool call in ToolCall. Index is
 	// always set; ID, Name and Arguments are provider-dependent fragments
 	// (arguments accumulate across deltas for the same Index).
@@ -26,6 +30,9 @@ type StreamEvent struct {
 	Type StreamEventType
 	// Text is the fragment for StreamTextDelta.
 	Text string
+	// Reasoning is the fragment for StreamReasoningDelta. It never becomes part
+	// of a materialized Message.
+	Reasoning string
 	// ToolCall is the delta for StreamToolCallDelta.
 	ToolCall ToolCall
 	// FinishReason is the provider finish reason for StreamFinish

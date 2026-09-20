@@ -42,6 +42,12 @@ func (c *Client) ChatStream(ctx context.Context, req *model.Request) (model.Stre
 	if req == nil {
 		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: errors.New("nil request")}
 	}
+	if c.protocol == ProtocolResponses {
+		return c.responsesChatStream(ctx, req)
+	}
+	if c.protocol != ProtocolChatCompletions {
+		return nil, &model.ModelError{Kind: model.ErrorInvalidRequest, Provider: provider, Err: fmt.Errorf("unsupported protocol %q", c.protocol)}
+	}
 	wire := streamRequest{Request: *req, Stream: true}
 	if wire.Model == "" {
 		wire.Model = c.defaultModel
@@ -167,6 +173,13 @@ func (s *streamReader) handleChunk(data string) bool {
 			s.finishSeen = true
 			s.finishReason = ch.FinishReason
 		}
+		reasoning := ch.Delta.ReasoningContent
+		if reasoning == "" {
+			reasoning = ch.Delta.Reasoning
+		}
+		if reasoning != "" {
+			s.queue = append(s.queue, model.StreamEvent{Type: model.StreamReasoningDelta, Reasoning: reasoning})
+		}
 		if ch.Delta.Content != "" {
 			s.queue = append(s.queue, model.StreamEvent{Type: model.StreamTextDelta, Text: ch.Delta.Content})
 		}
@@ -216,9 +229,11 @@ type chatChunk struct {
 }
 
 type wireDelta struct {
-	Role      string              `json:"role"`
-	Content   string              `json:"content"`
-	ToolCalls []wireToolCallDelta `json:"tool_calls"`
+	Role             string              `json:"role"`
+	Content          string              `json:"content"`
+	ReasoningContent string              `json:"reasoning_content"`
+	Reasoning        string              `json:"reasoning"`
+	ToolCalls        []wireToolCallDelta `json:"tool_calls"`
 }
 
 type wireToolCallDelta struct {

@@ -27,9 +27,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os/exec"
+	"strings"
 	"sync"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
@@ -50,6 +53,24 @@ const (
 // successful Connect.
 var ErrNotConnected = errors.New("mcp: client not connected")
 
+// ErrHeaderProvider is returned when HeaderProvider cannot supply request
+// headers. The provider's error is intentionally not exposed because it may
+// contain a rendered credential.
+var ErrHeaderProvider = errors.New("mcp: header provider failed")
+
+var errInvalidHTTPHeaders = errors.New("mcp: invalid HTTP headers")
+var ErrHeaderTemplate = errors.New("mcp: invalid HTTP header template")
+
+// HeaderValues supplies the only supported template variables; referenced values must be nonempty.
+type HeaderValues struct {
+	Username string
+	Group    string
+	Token    string
+}
+
+// HeaderProvider runs for every HTTP request, possibly concurrently, with its request context.
+type HeaderProvider func(context.Context) (HeaderValues, error)
+
 // Config describes how to reach one MCP server.
 type Config struct {
 	Transport Transport
@@ -68,6 +89,12 @@ type Config struct {
 
 	// HTTPClient is used with TransportHTTP. nil means http.DefaultClient.
 	HTTPClient *http.Client
+	// HTTPHeaders are cloned and support only {username}, {group}, and ${token} templates.
+	HTTPHeaders http.Header
+	// HeaderProvider supplies template values on every request; failure prevents sending.
+	HeaderProvider HeaderProvider
+	// OAuthHandler is passed to the official SDK; it cannot coexist with an Authorization header.
+	OAuthHandler auth.OAuthHandler
 	// DisableStandaloneSSE applies to TransportHTTP: when true, no
 	// standalone SSE stream is opened, so server-initiated messages (e.g.
 	// tool list changes) are not received. Request-response still works.
@@ -111,6 +138,30 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Version == "" {
 		cfg.Version = moduleVersion()
 	}
+	if cfg.Transport == TransportHTTP {
+		endpoint, err := url.Parse(cfg.URL)
+		if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil {
+			return nil, errors.New("mcp: invalid HTTP endpoint")
+		}
+		if !validHTTPHeaders(cfg.HTTPHeaders) {
+			return nil, errInvalidHTTPHeaders
+		}
+		for name, templates := range cfg.HTTPHeaders {
+			if cfg.OAuthHandler != nil && strings.EqualFold(name, "Authorization") {
+				return nil, errors.New("mcp: OAuthHandler conflicts with Authorization header")
+			}
+			for _, template := range templates {
+				_, dynamic, err := renderHeaderTemplate(template, nil)
+				if err != nil {
+					return nil, fmt.Errorf("%w: header %q: unknown template variable", ErrHeaderTemplate, name)
+				}
+				if dynamic && cfg.HeaderProvider == nil {
+					return nil, fmt.Errorf("%w: header %q uses a template variable but Config.HeaderProvider is nil", ErrHeaderTemplate, name)
+				}
+			}
+		}
+		cfg.HTTPHeaders = cfg.HTTPHeaders.Clone()
+	}
 	return &Client{cfg: cfg}, nil
 }
 
@@ -119,6 +170,11 @@ func NewClient(cfg Config) (*Client, error) {
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.connectLocked(ctx)
+}
+
+// connectLocked establishes a new session. c.mu must be held.
+func (c *Client) connectLocked(ctx context.Context) error {
 	if c.session != nil {
 		return nil
 	}
@@ -137,8 +193,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	case TransportHTTP:
 		transport = &mcpsdk.StreamableClientTransport{
 			Endpoint:             c.cfg.URL,
-			HTTPClient:           c.cfg.HTTPClient,
+			HTTPClient:           c.httpClient(),
 			DisableStandaloneSSE: c.cfg.DisableStandaloneSSE,
+			OAuthHandler:         c.cfg.OAuthHandler,
 		}
 	}
 
@@ -147,11 +204,219 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		if c.procCancel != nil {
 			c.procCancel()
+			c.procCancel = nil
 		}
 		return fmt.Errorf("mcp: connect via %s: %w", c.cfg.Transport, err)
 	}
 	c.session = sess
 	return nil
+}
+
+// httpClient returns a copy of the configured client whose transport decorates
+// only this MCP client's requests. Neither the caller's client nor the request
+// passed to the configured transport is mutated.
+func (c *Client) httpClient() *http.Client {
+	source := c.cfg.HTTPClient
+	if source == nil {
+		source = http.DefaultClient
+	}
+	client := *source
+	endpoint, _ := url.Parse(c.cfg.URL)
+	client.Transport = &headerTransport{
+		base:           source.Transport,
+		endpoint:       endpoint,
+		staticHeaders:  c.cfg.HTTPHeaders,
+		headerProvider: c.cfg.HeaderProvider,
+	}
+	return &client
+}
+
+type headerTransport struct {
+	base           http.RoundTripper
+	endpoint       *url.URL
+	staticHeaders  http.Header
+	headerProvider HeaderProvider
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, errInvalidHTTPHeaders
+	}
+	// Redirects must not replay dynamically injected credentials to another origin.
+	if t.endpoint != nil && (req.URL.Scheme != t.endpoint.Scheme || !strings.EqualFold(req.URL.Host, t.endpoint.Host)) {
+		return nil, errors.New("mcp: cross-origin HTTP request refused")
+	}
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	var values HeaderValues
+	if t.headerProvider != nil {
+		var err error
+		values, err = t.headerProvider(req.Context())
+		if err != nil {
+			return nil, ErrHeaderProvider
+		}
+	}
+	headers := t.staticHeaders.Clone()
+	for name, templates := range headers {
+		for i, template := range templates {
+			value, _, err := renderHeaderTemplate(template, &values)
+			if err != nil || !validHTTPHeaderValue(value) {
+				return nil, ErrHeaderProvider
+			}
+			headers[name][i] = value
+		}
+	}
+	request := req.Clone(req.Context())
+	if request.Header == nil {
+		request.Header = make(http.Header)
+	}
+	if !applyHTTPHeaders(request.Header, headers) {
+		return nil, errInvalidHTTPHeaders
+	}
+	if err := request.Context().Err(); err != nil {
+		return nil, err
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(request)
+}
+
+func renderHeaderTemplate(template string, values *HeaderValues) (string, bool, error) {
+	var out strings.Builder
+	dynamic := false
+	for i := 0; i < len(template); {
+		c := template[i]
+		atVariable := c == '{' || c == '}' || (c == '$' && i+1 < len(template) && template[i+1] == '{')
+		if !atVariable {
+			out.WriteByte(c)
+			i++
+			continue
+		}
+		var variable, value string
+		switch {
+		case strings.HasPrefix(template[i:], "{username}"):
+			variable = "{username}"
+			if values != nil {
+				value = values.Username
+			}
+		case strings.HasPrefix(template[i:], "{group}"):
+			variable = "{group}"
+			if values != nil {
+				value = values.Group
+			}
+		case strings.HasPrefix(template[i:], "${token}"):
+			variable = "${token}"
+			if values != nil {
+				value = values.Token
+			}
+		default:
+			return "", false, ErrHeaderTemplate
+		}
+		if values != nil && value == "" {
+			return "", true, ErrHeaderProvider
+		}
+		dynamic = true
+		out.WriteString(value)
+		i += len(variable)
+	}
+	return out.String(), dynamic, nil
+}
+
+// applyHTTPHeaders replaces values for each source header in dst. It copies
+// each slice so neither static nor provider-owned maps can be modified by a
+// request or its transport.
+func applyHTTPHeaders(dst, source http.Header) bool {
+	if !validHTTPHeaders(source) {
+		return false
+	}
+	for name, values := range source {
+		for existing := range dst {
+			if strings.EqualFold(existing, name) {
+				delete(dst, existing)
+			}
+		}
+		if len(values) == 0 {
+			continue
+		}
+		key := http.CanonicalHeaderKey(name)
+		dst[key] = append([]string(nil), values...)
+	}
+	return true
+}
+
+func validHTTPHeaders(headers http.Header) bool {
+	for name, values := range headers {
+		if !validHTTPHeaderName(name) {
+			return false
+		}
+		for _, value := range values {
+			if !validHTTPHeaderValue(value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validHTTPHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < ' ' && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// Reconnect closes the current transport, if any, and establishes a new MCP
+// session. It is useful after a remote disconnect or when a new session must
+// use refreshed credentials. Like Connect, it cannot be used after Close.
+// Tools returned before Reconnect belong to the old session; call Tools again
+// after a successful reconnect.
+func (c *Client) Reconnect(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("mcp: client closed")
+	}
+
+	sess, procCancel := c.session, c.procCancel
+	c.session = nil
+	c.procCancel = nil
+	if sess != nil {
+		if err := sess.Close(); err != nil {
+			if procCancel != nil {
+				procCancel()
+			}
+			return fmt.Errorf("mcp: close before reconnect: %w", err)
+		}
+	}
+	if procCancel != nil {
+		procCancel()
+	}
+	return c.connectLocked(ctx)
 }
 
 // Tools lists the server's tools, adapted to the SDK's tool.Tool interface.

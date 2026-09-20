@@ -15,7 +15,7 @@ import (
 )
 
 func handoffAgent(name, sys string, m model.Model, handoffs ...Handoff) *Agent {
-	return &Agent{Name: name, Instructions: sys, Model: m, Handoffs: handoffs}
+	return &Agent{ID: handoffSlug(name), Name: name, Instructions: sys, Model: m, Handoffs: handoffs}
 }
 
 func TestHandoffSlug(t *testing.T) {
@@ -34,7 +34,7 @@ func TestHandoffSlug(t *testing.T) {
 }
 
 func TestHandoffSpec(t *testing.T) {
-	spec := Handoff{Target: &Agent{Name: "Research Specialist"}}.Spec()
+	spec := Handoff{Target: &Agent{ID: "research-specialist", Name: "Research Specialist"}}.Spec()
 	if spec.Type != "function" || spec.Function.Name != "transfer_to_research_specialist" {
 		t.Fatalf("spec = %+v", spec)
 	}
@@ -44,7 +44,7 @@ func TestHandoffSpec(t *testing.T) {
 	if string(spec.Function.Parameters) != `{"type":"object","properties":{}}` {
 		t.Fatalf("parameters = %s", spec.Function.Parameters)
 	}
-	h := Handoff{Target: &Agent{Name: "b"}, Name: "escalate", Description: "custom"}
+	h := Handoff{Target: &Agent{ID: "b", Name: "b"}, Name: "escalate", Description: "custom"}
 	if got := h.Spec().Function.Name; got != "escalate" {
 		t.Fatalf("override name = %q", got)
 	}
@@ -174,7 +174,7 @@ func TestHandoffValidation(t *testing.T) {
 		{"nil target", handoffAgent("a", "", testutil.NewScripted(testutil.TextStep("x")),
 			Handoff{}), "has no target"},
 		{"target without model", handoffAgent("a", "", testutil.NewScripted(testutil.TextStep("x")),
-			Handoff{Target: &Agent{Name: "b"}}), "no model configured"},
+			Handoff{Target: &Agent{ID: "b", Name: "b"}}), "no model configured"},
 		{"conflicts with regular tool", func() *Agent {
 			a := handoffAgent("a", "", testutil.NewScripted(
 				testutil.ToolCallStep("h1", "transfer_to_b", "{}")),
@@ -190,7 +190,7 @@ func TestHandoffValidation(t *testing.T) {
 			testutil.ToolCallStep("h1", "transfer_to_b", "{}")),
 			Handoff{Target: handoffAgent("b", "b sys", testutil.NewScripted(
 				testutil.ToolCallStep("h2", "transfer_to_c", "{}")),
-				Handoff{Target: &Agent{Name: "c"}})}),
+				Handoff{Target: &Agent{ID: "c", Name: "c"}})}),
 			`switch to agent "b"`},
 	}
 	for _, tc := range cases {
@@ -209,7 +209,7 @@ func TestHandoffMaxTurnsShared(t *testing.T) {
 		calls++
 		return testutil.ToolCallStep(fmt.Sprintf("c%d", calls), "get_weather", "{}").Resp, nil
 	})
-	b := &Agent{Name: "b", Instructions: "b sys", Model: m}
+	b := &Agent{ID: "b", Name: "b", Instructions: "b sys", Model: m}
 	a := handoffAgent("a", "a sys", testutil.NewScripted(
 		testutil.ToolCallStep("h1", "transfer_to_b", "{}"),
 	), Handoff{Target: b})
@@ -282,7 +282,7 @@ func TestSlogHooksHandoff(t *testing.T) {
 	if !ok {
 		t.Fatal("SlogHooks does not implement HandoffHook")
 	}
-	hh.OnHandoff(context.Background(), &Agent{Name: "triage"}, &Agent{Name: "specialist"}, "run1")
+	hh.OnHandoff(context.Background(), &Agent{ID: "triage", Name: "triage"}, &Agent{ID: "specialist", Name: "specialist"}, "run1")
 	if !strings.Contains(buf.String(), "from=triage") || !strings.Contains(buf.String(), "to=specialist") {
 		t.Fatalf("log = %s", buf.String())
 	}
@@ -326,7 +326,7 @@ func TestStreamHandoff(t *testing.T) {
 	if strings.Join(toStrings(types), ",") != strings.Join(toStrings(want), ",") {
 		t.Fatalf("events = %v, want %v", types, want)
 	}
-	if handoffEv == nil || handoffEv.FromAgent != "triage" || handoffEv.ToAgent != "specialist" {
+	if handoffEv == nil || handoffEv.From != (AgentRef{ID: "triage", Name: "triage"}) || handoffEv.To != (AgentRef{ID: "specialist", Name: "specialist"}) {
 		t.Fatalf("handoff event = %+v", handoffEv)
 	}
 	if toolResults != 1 {
@@ -338,6 +338,28 @@ func TestStreamHandoff(t *testing.T) {
 	}
 	if res.Agent != b || strings.Join(res.Transfers, ",") != "specialist" {
 		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestStreamHandoffErrorAttributedToTarget(t *testing.T) {
+	boom := errors.New("target unavailable")
+	target := handoffAgent("target", "", model.ModelFunc(func(context.Context, *model.Request) (*model.Response, error) {
+		return nil, boom
+	}))
+	entry := handoffAgent("entry", "", testutil.NewScripted(
+		testutil.ToolCallStep("call_1", "transfer_to_target", "{}"),
+	), Handoff{Target: target})
+
+	events, _, err := drain(t, NewRunner().RunStream(context.Background(), entry, "delegate"))
+	if !errors.Is(err, boom) {
+		t.Fatalf("run error = %v, want target error", err)
+	}
+	last := events[len(events)-1]
+	if last.Type != StreamRunError || last.Agent != (AgentRef{ID: "target", Name: "target"}) {
+		t.Fatalf("terminal event = %+v", last)
+	}
+	if last.Task.RootRunID == "" || last.Task.RootRunID != last.Task.SourceRunID {
+		t.Fatalf("terminal task = %+v", last.Task)
 	}
 }
 

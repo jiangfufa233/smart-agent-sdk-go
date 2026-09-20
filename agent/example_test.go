@@ -22,6 +22,7 @@ func Example() {
 	})
 
 	res, err := agent.NewRunner().Run(context.Background(), &agent.Agent{
+		ID:           "demo",
 		Name:         "demo",
 		Instructions: "You are a weather assistant.",
 		Model:        m,

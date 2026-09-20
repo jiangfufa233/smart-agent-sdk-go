@@ -31,6 +31,11 @@ func TextChunk(s string) model.StreamEvent {
 	return model.StreamEvent{Type: model.StreamTextDelta, Text: s}
 }
 
+// ReasoningChunk returns a private reasoning-delta stream event.
+func ReasoningChunk(s string) model.StreamEvent {
+	return model.StreamEvent{Type: model.StreamReasoningDelta, Reasoning: s}
+}
+
 // ToolCallChunk returns a tool-call-delta stream event.
 func ToolCallChunk(tc model.ToolCall) model.StreamEvent {
 	return model.StreamEvent{Type: model.StreamToolCallDelta, ToolCall: tc}

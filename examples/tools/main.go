@@ -39,6 +39,7 @@ func main() {
 	}
 
 	a := &agent.Agent{
+		ID:           "weather-agent",
 		Name:         "weather-agent",
 		Instructions: "You are a helpful assistant. Use tools when they can answer the question.",
 		Model:        openai.New(openai.Config{APIKey: apiKey}),

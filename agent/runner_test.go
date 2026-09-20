@@ -60,7 +60,7 @@ func failingTool(name string, err error) tool.Tool {
 }
 
 func newAgent(m model.Model, tools ...tool.Tool) *Agent {
-	return &Agent{Name: "test", Instructions: "sys", Model: m, Tools: tools}
+	return &Agent{ID: "test", Name: "test", Instructions: "sys", Model: m, Tools: tools}
 }
 
 func TestHappyLoop(t *testing.T) {
@@ -273,9 +273,20 @@ func TestHooksSequence(t *testing.T) {
 }
 
 func TestNoModelConfigured(t *testing.T) {
-	_, err := NewRunner().Run(context.Background(), &Agent{Name: "x"}, "x")
+	_, err := NewRunner().Run(context.Background(), &Agent{ID: "x", Name: "x"}, "x")
 	if err == nil || !strings.Contains(err.Error(), "no model") {
 		t.Fatalf("expected no-model error, got %v", err)
+	}
+}
+
+func TestAgentIdentityRequired(t *testing.T) {
+	for _, a := range []*Agent{
+		{Name: "name", Model: testutil.NewScripted(testutil.TextStep("unused"))},
+		{ID: "id", Model: testutil.NewScripted(testutil.TextStep("unused"))},
+	} {
+		if _, err := NewRunner().Run(context.Background(), a, "input"); err == nil {
+			t.Fatalf("Run(%+v) succeeded without a complete identity", a)
+		}
 	}
 }
 

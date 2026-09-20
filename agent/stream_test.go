@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,30 @@ func TestRunStreamTextDeltas(t *testing.T) {
 	}
 	if res.Output != "Hello" || res.Usage.TotalTokens != 12 {
 		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestRunStreamReasoningIsObservableOnly(t *testing.T) {
+	m := testutil.NewScriptedStream(testutil.StreamStep{
+		Deltas: []model.StreamEvent{
+			testutil.ReasoningChunk("considering"),
+			testutil.TextChunk("answer"),
+		},
+		FinishReason: "stop",
+	})
+	evs, res, err := drain(t, NewRunner().RunStream(context.Background(), newAgent(m), "question"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	requireTypes(t, evs, StreamRunStarted, StreamReasoningDelta, StreamTextDelta, StreamFinalOutput)
+	if evs[1].Reasoning != "considering" || evs[1].Text != "" {
+		t.Fatalf("reasoning event = %+v", evs[1])
+	}
+	if res.Output != "answer" || res.FinalMessage.Content != "answer" {
+		t.Fatalf("reasoning leaked into result: %+v", res)
+	}
+	if evs[1].Agent != (AgentRef{ID: "test", Name: "test"}) || evs[1].Task.RootRunID == "" || evs[1].Task.RootRunID != evs[1].Task.SourceRunID || evs[1].Task.ID != evs[1].Task.RootRunID {
+		t.Fatalf("event references = %+v", evs[1])
 	}
 }
 
@@ -174,6 +199,64 @@ func TestRunStreamToolErrorParity(t *testing.T) {
 	}
 	if len(res.ToolErrors) != 1 {
 		t.Fatalf("ToolErrors = %+v", res.ToolErrors)
+	}
+}
+
+func TestRunStreamApprovalDenialLetsManagerRecover(t *testing.T) {
+	executed := false
+	restricted, err := tool.NewFunction("restricted", "requires human approval",
+		func(context.Context, struct{}) (string, error) {
+			executed = true
+			return "should not run", nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected := tool.WithPolicy(restricted, tool.RequireApproval(tool.ApproverFunc(func(context.Context, tool.ApprovalRequest) (bool, error) {
+		return false, nil
+	})))
+
+	managerModel := testutil.NewScriptedStream(
+		testutil.StreamStep{
+			Deltas: []model.StreamEvent{
+				testutil.ToolCallChunk(model.ToolCall{Index: 0, ID: "c1", Type: "function",
+					Function: model.FunctionCall{Name: "restricted", Arguments: "{}"}}),
+			},
+			FinishReason: "tool_calls",
+		},
+		testutil.StreamStep{Deltas: []model.StreamEvent{testutil.TextChunk("manager recovered")}, FinishReason: "stop"},
+	)
+	manager := &Agent{
+		ID:           "manager",
+		Name:         "Manager",
+		Instructions: "recover from failed tools",
+		Model:        managerModel,
+		Tools:        []tool.Tool{protected},
+	}
+
+	evs, res, err := drain(t, NewRunner().RunStream(context.Background(), manager, "perform the action"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	requireTypes(t, evs,
+		StreamRunStarted, StreamToolCallStarted, StreamToolCallArgs, StreamToolCallFinished,
+		StreamToolResult, StreamTextDelta, StreamFinalOutput)
+	if executed {
+		t.Fatal("denied tool executed")
+	}
+	if res.Output != "manager recovered" || len(res.ToolErrors) != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	var authErr *tool.AuthorizationError
+	if !errors.As(res.ToolErrors[0], &authErr) || authErr.Tool != "restricted" {
+		t.Fatalf("tool error = %v, want restricted AuthorizationError", res.ToolErrors[0])
+	}
+	if evs[4].ToolErr == nil || !errors.As(evs[4].ToolErr, &authErr) {
+		t.Fatalf("tool result event = %+v", evs[4])
+	}
+	request := managerModel.LastRequest()
+	if request == nil || len(request.Messages) == 0 || !strings.Contains(request.Messages[len(request.Messages)-1].Content, "human approval denied") {
+		t.Fatalf("manager did not receive approval denial: %+v", request)
 	}
 }
 
@@ -276,7 +359,7 @@ func TestRunStreamRequestError(t *testing.T) {
 }
 
 func TestRunStreamNoModel(t *testing.T) {
-	evs, res, err := drain(t, NewRunner().RunStream(context.Background(), &Agent{Name: "x"}, "hi"))
+	evs, res, err := drain(t, NewRunner().RunStream(context.Background(), &Agent{ID: "x", Name: "x"}, "hi"))
 	if res != nil || err == nil {
 		t.Fatalf("result = (%+v, %v), want error", res, err)
 	}
@@ -309,7 +392,7 @@ func TestRunStreamWithHistory(t *testing.T) {
 		Deltas:       []model.StreamEvent{testutil.TextChunk("again")},
 		FinishReason: "stop",
 	})
-	a := &Agent{Name: "chat", Model: m} // no instructions
+	a := &Agent{ID: "chat", Name: "chat", Model: m} // no instructions
 	history := []model.Message{
 		{Role: model.RoleSystem, Content: "sys"},
 		{Role: model.RoleUser, Content: "first"},

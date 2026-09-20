@@ -5,13 +5,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/goleak"
+	"golang.org/x/oauth2"
 
 	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
 )
@@ -365,6 +368,300 @@ func TestHTTPEndToEnd(t *testing.T) {
 	}
 }
 
+type httpHeaderRecorder struct {
+	mu      sync.Mutex
+	headers []http.Header
+}
+
+func (r *httpHeaderRecorder) record(req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.headers = append(r.headers, req.Header.Clone())
+}
+
+func (r *httpHeaderRecorder) snapshot() []http.Header {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]http.Header(nil), r.headers...)
+}
+
+func newObservedHTTPServer(t *testing.T, recorder *httpHeaderRecorder) *httptest.Server {
+	t.Helper()
+	server := newTestServer()
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server {
+		return server
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		recorder.record(req)
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(func() {
+		for ss := range server.Sessions() {
+			_ = ss.Close()
+		}
+		ts.Close()
+	})
+	return ts
+}
+
+type headerProviderContextKey struct{}
+
+func TestHTTPStaticAndDynamicHeaders(t *testing.T) {
+	recorder := &httpHeaderRecorder{}
+	ts := newObservedHTTPServer(t, recorder)
+
+	headers := http.Header{
+		"X-Static":      {"configured"},
+		"X-Multi":       {"one", "two"},
+		"Authorization": {"Bearer ${token}"},
+		"X-User":        {"{username}"},
+		"X-Group":       {"{group}"},
+	}
+	callerClient := &http.Client{}
+	var providerMu sync.Mutex
+	providerCalls := 0
+	providerValues := HeaderValues{Username: "alice", Group: "devs", Token: "dynamic-token"}
+	c, err := NewClient(Config{
+		Transport:            TransportHTTP,
+		URL:                  ts.URL,
+		HTTPClient:           callerClient,
+		HTTPHeaders:          headers,
+		DisableStandaloneSSE: true,
+		HeaderProvider: func(ctx context.Context) (HeaderValues, error) {
+			if got, _ := ctx.Value(headerProviderContextKey{}).(string); got != "request-context" {
+				t.Errorf("provider context = %q, want request-context", got)
+			}
+			providerMu.Lock()
+			providerCalls++
+			providerMu.Unlock()
+			return providerValues, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// NewClient owns a clone rather than the caller's header map.
+	headers.Set("X-Static", "caller-mutated")
+	ctx := context.WithValue(t.Context(), headerProviderContextKey{}, "request-context")
+	if err := c.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := c.Tools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTool(t, tools, "add").Run(ctx, `{"a":20,"b":22}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := recorder.snapshot()
+	if len(rec) == 0 {
+		t.Fatal("server did not receive any requests")
+	}
+	providerMu.Lock()
+	calls := providerCalls
+	providerMu.Unlock()
+	if calls != len(rec) {
+		t.Errorf("provider calls = %d, server requests = %d", calls, len(rec))
+	}
+	for i, got := range rec {
+		if value := got.Get("X-Static"); value != "configured" {
+			t.Errorf("request %d X-Static = %q, want configured", i, value)
+		}
+		if values := got.Values("X-Multi"); len(values) != 2 || values[0] != "one" || values[1] != "two" {
+			t.Errorf("request %d X-Multi = %q, want [one two]", i, values)
+		}
+		if value := got.Get("Authorization"); value != "Bearer dynamic-token" {
+			t.Errorf("request %d Authorization = %q, want rendered token template", i, value)
+		}
+		if value := got.Get("X-User"); value != "alice" {
+			t.Errorf("request %d X-User = %q", i, value)
+		}
+		if value := got.Get("X-Group"); value != "devs" {
+			t.Errorf("request %d X-Group = %q", i, value)
+		}
+	}
+	if providerValues != (HeaderValues{Username: "alice", Group: "devs", Token: "dynamic-token"}) {
+		t.Errorf("provider values were mutated: %+v", providerValues)
+	}
+	if callerClient.Transport != nil {
+		t.Error("NewClient mutated the caller's HTTP client transport")
+	}
+}
+
+func TestHTTPHeaderProviderRotationAcrossReconnect(t *testing.T) {
+	recorder := &httpHeaderRecorder{}
+	ts := newObservedHTTPServer(t, recorder)
+
+	var tokenMu sync.Mutex
+	token := "first"
+	provider := func(context.Context) (HeaderValues, error) {
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		return HeaderValues{Token: token}, nil
+	}
+	c, err := NewClient(Config{
+		Transport:            TransportHTTP,
+		URL:                  ts.URL,
+		HTTPHeaders:          http.Header{"X-Static": {"static"}, "Authorization": {"Bearer ${token}"}},
+		HeaderProvider:       provider,
+		DisableStandaloneSSE: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	assertHeaders := func(from int, wantToken string) {
+		t.Helper()
+		headers := recorder.snapshot()
+		if len(headers) == from {
+			t.Fatalf("no requests recorded after index %d", from)
+		}
+		for i, got := range headers[from:] {
+			if value := got.Get("X-Static"); value != "static" {
+				t.Errorf("request %d X-Static = %q", from+i, value)
+			}
+			if value := got.Get("Authorization"); value != "Bearer "+wantToken {
+				t.Errorf("request %d Authorization = %q, want token %q", from+i, value, wantToken)
+			}
+		}
+	}
+	setToken := func(value string) {
+		tokenMu.Lock()
+		token = value
+		tokenMu.Unlock()
+	}
+
+	if err := c.Connect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	firstEnd := len(recorder.snapshot())
+	if firstEnd == 0 {
+		t.Fatal("connect did not make a request")
+	}
+	assertHeaders(0, "first")
+
+	setToken("second")
+	if _, err := c.Tools(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	secondEnd := len(recorder.snapshot())
+	assertHeaders(firstEnd, "second")
+
+	setToken("third")
+	if err := c.Reconnect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	assertHeaders(secondEnd, "third")
+	reconnectEnd := len(recorder.snapshot())
+	if _, err := c.Tools(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	assertHeaders(reconnectEnd, "third")
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestHTTPHeaderTransportClonesRequestAndHeaderMaps(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://example.test", nil)
+	request.Header.Set("X-Original", "keep")
+	staticHeaders := http.Header{"X-Static": {"static"}, "Authorization": {"Bearer ${token}"}}
+	var received *http.Request
+	transport := &headerTransport{
+		staticHeaders: staticHeaders,
+		headerProvider: func(context.Context) (HeaderValues, error) {
+			return HeaderValues{Token: "dynamic-token"}, nil
+		},
+		base: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			received = req
+			req.Header.Set("X-Transport", "mutated-clone")
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+		}),
+	}
+
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if received == request {
+		t.Error("underlying RoundTripper received the caller's request")
+	}
+	if value := request.Header.Get("X-Original"); value != "keep" {
+		t.Errorf("original request header = %q, want keep", value)
+	}
+	if value := request.Header.Get("X-Static"); value != "" {
+		t.Errorf("static header mutated original request: %q", value)
+	}
+	if value := request.Header.Get("Authorization"); value != "" {
+		t.Errorf("provider header mutated original request: %q", value)
+	}
+	if value := request.Header.Get("X-Transport"); value != "" {
+		t.Errorf("base transport mutation reached original request: %q", value)
+	}
+	if value := received.Header.Get("X-Static"); value != "static" {
+		t.Errorf("received static header = %q", value)
+	}
+	if value := received.Header.Get("Authorization"); value != "Bearer dynamic-token" {
+		t.Errorf("received dynamic header = %q", value)
+	}
+	if value := staticHeaders.Get("Authorization"); value != "Bearer ${token}" {
+		t.Errorf("static header map was mutated: %q", value)
+	}
+}
+
+func TestHTTPHeaderProviderFailurePreventsRequestsAndRedactsSecret(t *testing.T) {
+	secret := "Bearer rendered-secret-value"
+	var requestMu sync.Mutex
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requestMu.Lock()
+		requests++
+		requestMu.Unlock()
+	}))
+	defer ts.Close()
+
+	c, err := NewClient(Config{
+		Transport:            TransportHTTP,
+		URL:                  ts.URL,
+		DisableStandaloneSSE: true,
+		HeaderProvider: func(context.Context) (HeaderValues, error) {
+			return HeaderValues{}, errors.New("credential refresh failed for " + secret)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	err = c.Connect(t.Context())
+	if err == nil {
+		t.Fatal("Connect succeeded with a failing header provider")
+	}
+	if !errors.Is(err, ErrHeaderProvider) {
+		t.Errorf("Connect error = %v, want ErrHeaderProvider", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("Connect error exposed secret: %v", err)
+	}
+	requestMu.Lock()
+	gotRequests := requests
+	requestMu.Unlock()
+	if gotRequests != 0 {
+		t.Errorf("server received %d requests after provider failure", gotRequests)
+	}
+}
+
 func TestHTTPRefusedConnection(t *testing.T) {
 	ts := httptest.NewServer(http.NotFoundHandler())
 	url := ts.URL
@@ -391,5 +688,222 @@ func TestCallToolContextTimeout(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	if _, err := findTool(t, tools, "add").Run(ctx, `{"a":1,"b":1}`); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
+// --- header template authentication -----------------------------------------
+
+type stubOAuthHandler struct{}
+
+func (stubOAuthHandler) TokenSource(context.Context) (oauth2.TokenSource, error) { return nil, nil }
+func (stubOAuthHandler) Authorize(context.Context, *http.Request, *http.Response) error {
+	return nil
+}
+
+type staticOAuthHandler struct {
+	token string
+}
+
+func (h staticOAuthHandler) TokenSource(context.Context) (oauth2.TokenSource, error) {
+	return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: h.token, TokenType: "Bearer"}), nil
+}
+
+func (staticOAuthHandler) Authorize(context.Context, *http.Request, *http.Response) error {
+	return errors.New("authorize must not be called while TokenSource supplies a token")
+}
+
+func TestHeaderTemplateValidation(t *testing.T) {
+	base := func(headers http.Header) Config {
+		return Config{Transport: TransportHTTP, URL: "http://example.test", HTTPHeaders: headers}
+	}
+	_, err := NewClient(base(http.Header{"X-Bad": {"Bearer {unknown}"}}))
+	if !errors.Is(err, ErrHeaderTemplate) {
+		t.Errorf("unknown template variable: got %v", err)
+	}
+	_, err = NewClient(base(http.Header{"Authorization": {"Bearer ${token}"}}))
+	if !errors.Is(err, ErrHeaderTemplate) {
+		t.Errorf("dynamic template without provider: got %v", err)
+	}
+	_, err = NewClient(Config{
+		Transport:    TransportHTTP,
+		URL:          "http://example.test",
+		HTTPHeaders:  http.Header{"Authorization": {"Bearer static"}},
+		OAuthHandler: stubOAuthHandler{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Errorf("OAuthHandler + Authorization header: got %v", err)
+	}
+	_, err = NewClient(base(http.Header{"Authorization": {"Bearer ${token}"}, "X-User": {"{username}"}}))
+	if !errors.Is(err, ErrHeaderTemplate) {
+		t.Errorf("one dynamic header still requires a provider: got %v", err)
+	}
+	c, err := NewClient(Config{
+		Transport:      TransportHTTP,
+		URL:            "http://example.test",
+		HTTPHeaders:    http.Header{"Authorization": {"Bearer ${token}"}, "X-Literal": {"static-value"}},
+		HeaderProvider: func(context.Context) (HeaderValues, error) { return HeaderValues{Token: "t"}, nil },
+	})
+	if err != nil {
+		t.Errorf("valid templated config rejected: %v", err)
+	}
+	_ = c
+}
+
+func TestRenderHeaderTemplate(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		values   *HeaderValues
+		want     string
+		dynamic  bool
+		err      error
+	}{
+		{name: "static", template: "Bearer static", values: nil, want: "Bearer static"},
+		{name: "token", template: "Bearer ${token}", values: &HeaderValues{Token: "t"}, want: "Bearer t", dynamic: true},
+		{name: "user and group", template: "{username}/{group}", values: &HeaderValues{Username: "u", Group: "g"}, want: "u/g", dynamic: true},
+		{name: "mixed", template: "${token}:{username}", values: &HeaderValues{Username: "u", Token: "t"}, want: "t:u", dynamic: true},
+		{name: "empty token with values", template: "Bearer ${token}", values: &HeaderValues{}, want: "", dynamic: true, err: ErrHeaderProvider},
+		{name: "empty user with values", template: "{username}", values: &HeaderValues{}, want: "", dynamic: true, err: ErrHeaderProvider},
+		{name: "unknown variable", template: "Bearer {unknown}", values: &HeaderValues{}, want: "", err: ErrHeaderTemplate},
+		{name: "unknown dollar variable", template: "Bearer ${unknown}", values: &HeaderValues{}, want: "", err: ErrHeaderTemplate},
+		{name: "unclosed variable", template: "Bearer {username", values: &HeaderValues{}, want: "", err: ErrHeaderTemplate},
+		{name: "validation ignores empty values", template: "Bearer ${token}", values: nil, want: "Bearer ", dynamic: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, dynamic, err := renderHeaderTemplate(tt.template, tt.values)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("err = %v, want %v", err, tt.err)
+			}
+			if got != tt.want {
+				t.Errorf("rendered = %q, want %q", got, tt.want)
+			}
+			if dynamic != tt.dynamic {
+				t.Errorf("dynamic = %t, want %t", dynamic, tt.dynamic)
+			}
+		})
+	}
+}
+
+func TestHeaderTransportRefusesCrossOrigin(t *testing.T) {
+	endpoint, _ := url.Parse("http://origin.test/mcp")
+	var baseCalled bool
+	transport := &headerTransport{
+		endpoint: endpoint,
+		base: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			baseCalled = true
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://other.test/mcp", nil)
+	if _, err := transport.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "cross-origin") {
+		t.Fatalf("cross-origin request: got %v, want refusal", err)
+	}
+	if baseCalled {
+		t.Error("cross-origin request reached the base transport")
+	}
+
+	sameOrigin := httptest.NewRequest(http.MethodGet, "http://origin.test/other", nil)
+	resp, err := transport.RoundTrip(sameOrigin)
+	if err != nil {
+		t.Fatalf("same-origin request: %v", err)
+	}
+	_ = resp.Body.Close()
+}
+
+func TestHTTPRedirectCrossOriginRefused(t *testing.T) {
+	var targetMu sync.Mutex
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetMu.Lock()
+		targetRequests++
+		targetMu.Unlock()
+	}))
+	defer target.Close()
+
+	var originRequests int
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests++
+		http.Redirect(w, r, target.URL+"/redirected", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	c, err := NewClient(Config{
+		Transport:            TransportHTTP,
+		URL:                  origin.URL,
+		HTTPHeaders:          http.Header{"Authorization": {"Bearer ${token}"}},
+		HeaderProvider:       func(context.Context) (HeaderValues, error) { return HeaderValues{Token: "secret"}, nil },
+		DisableStandaloneSSE: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	err = c.Connect(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "cross-origin") {
+		t.Fatalf("redirected connect: got %v, want cross-origin refusal", err)
+	}
+	targetMu.Lock()
+	hits := targetRequests
+	targetMu.Unlock()
+	if hits != 0 {
+		t.Errorf("redirect target received %d requests", hits)
+	}
+	if originRequests == 0 {
+		t.Error("origin server was never contacted")
+	}
+}
+
+func TestHTTPOAuthHandlerPassthrough(t *testing.T) {
+	var authMu sync.Mutex
+	authHeaders := map[string]int{}
+	server := newTestServer()
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return server }, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		auth := req.Header.Get("Authorization")
+		authMu.Lock()
+		authHeaders[auth]++
+		authMu.Unlock()
+		if auth != "Bearer oauth-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(func() {
+		for ss := range server.Sessions() {
+			_ = ss.Close()
+		}
+		ts.Close()
+	})
+
+	c, err := NewClient(Config{
+		Transport:            TransportHTTP,
+		URL:                  ts.URL,
+		OAuthHandler:         staticOAuthHandler{token: "oauth-secret"},
+		DisableStandaloneSSE: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	if err := c.Connect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := c.Tools(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := findTool(t, tools, "add").Run(t.Context(), `{"a":1,"b":1}`)
+	if err != nil || !strings.Contains(out, `"sum":2`) {
+		t.Fatalf("authorized tool call = (%q, %v)", out, err)
+	}
+	authMu.Lock()
+	defer authMu.Unlock()
+	if authHeaders["Bearer oauth-secret"] == 0 {
+		t.Errorf("server never saw the OAuth bearer token: %v", authHeaders)
 	}
 }

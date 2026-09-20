@@ -4,6 +4,72 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-09-20
+
+### Added
+
+- Task correlation across multi-agent runs: `agent.TaskRef` (ID, ParentID,
+  RootRunID, SourceRunID) flows through `context.Context` (`agent.WithTask`,
+  `agent.TaskFromContext`) and every `agent.StreamEvent` carries the active
+  agent, task and zero-based turn, so delegated and workflow events can be
+  correlated in one root stream.
+- Delegation (`handoff.Delegate(target, runner)`): the target runs as an
+  isolated child task and its output becomes the tool result; during a
+  streaming parent run the child's process events are forwarded under a
+  dedicated task reference (`StreamTaskStarted` / `StreamTaskCompleted` /
+  `StreamTaskFailed`), child failures stay recoverable by the manager.
+- The new `workflow` package executes declared DAGs of agent tasks:
+  `Sequence` / `Parallel` plans, `Continue` / `FailFast` failure modes,
+  per-task sessions with affinity-aware scheduling, `BuildInput` assembly
+  from dependency results, plan validation (cycles, duplicate IDs, unknown
+  dependencies, concurrently shared sessions) and a normalized event stream
+  that forwards the underlying agent events.
+- Session item-first API: every stored message becomes an `agent.SessionItem`
+  with a stable session-local ID, and `agent.Session` grows `List` /
+  `Append` / `Replace` / `Clear`. `Replace` validates the closed ID range
+  (`*agent.SessionRangeError`) and leaves the session untouched on failure.
+  The memory, file and SQLite stores are concurrency-safe, and
+  `session.Summarizer` folds replaced ranges into its rolling summary.
+- Offline token counting: the `tokenizer` package implements cl100k_base
+  (`NewCL100K`, `CountText`, `CountMessages`) with no network or cgo,
+  validated against 886 official tiktoken vectors.
+- MCP authentication for streamable-http servers: `Config.HTTPHeaders`
+  values support the strict templates `{username}`, `{group}` and `${token}`,
+  rendered from `HeaderProvider` on every request (token rotation without
+  reconnecting). `Config.OAuthHandler` passes through to the official
+  go-sdk (mutually exclusive with a manual `Authorization` header).
+  Template variables are validated in `NewClient`, provider failures and
+  empty credential values prevent sending, provider errors are redacted,
+  and dynamically injected credentials never follow redirects to another
+  origin.
+- `tool.WithPolicy` guards expose `Unwrap` and `Policy`, so wrapping a
+  delegated tool keeps both authorization and task-scoped streaming: the
+  runner unwraps the guard, applies the policy to the delegation call and
+  then executes the child with full event forwarding.
+- `tool.RequireApproval` also denies a call when the context is canceled
+  after the approver returned an allow, so a late approval never executes
+  work for a dead run.
+
+### Changed
+
+- `mcp.Config.HeaderProvider` now returns the structured `mcp.HeaderValues`
+  (Username / Group / Token) instead of an unconstrained `http.Header`;
+  header values containing unknown template variables are rejected in
+  `NewClient` (`mcp.ErrHeaderTemplate`).
+- `workflow.Sequence` copies the supplied tasks and their `DependsOn`
+  slices instead of mutating the caller's data.
+
+### Documentation
+
+- Tutorial lesson 7 gains a workflow-orchestration subsection (Sequence /
+  parallel / DAG plans, `BuildInput` contract, Continue vs FailFast and
+  cancel semantics, per-task sessions) in both the Chinese and English
+  editions.
+- Tutorial lesson 10 documents authenticated remote MCP services: strict
+  header templates with `HeaderValues`, the `OAuthHandler` alternative,
+  credential redaction, and cross-origin redirect denial. Lesson 13 notes
+  that an approval arriving after context cancellation is a denial.
+
 ## [1.0.0] - 2026-09-05
 
 ### Added

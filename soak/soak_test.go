@@ -275,8 +275,9 @@ func TestSoakStreamLoop(t *testing.T) {
 	runner := &agent.Runner{Hooks: auditLogger}
 
 	run := func(i int) (*agent.RunResult, *agent.Agent, *agent.Agent, error) {
-		b := &agent.Agent{Name: "b", Instructions: "soak target", Model: &loopModel{}}
+		b := &agent.Agent{ID: "b", Name: "b", Instructions: "soak target", Model: &loopModel{}}
 		a := &agent.Agent{
+			ID:               "a",
 			Name:             "a",
 			Instructions:     "soak",
 			Model:            &loopModel{},
@@ -330,10 +331,10 @@ func TestSoakFaultInjection(t *testing.T) {
 	run := func(i int) (*agent.RunResult, error) {
 		switch i % 3 {
 		case 0: // transient 429s absorbed by WithRetry
-			a := &agent.Agent{Name: "retry", Model: model.WithRetry(&flakyModel{fails: 2}, policy)}
+			a := &agent.Agent{ID: "retry", Name: "retry", Model: model.WithRetry(&flakyModel{fails: 2}, policy)}
 			return runner.Run(ctx, a, "ping")
 		case 1: // permanent primary failure falls through Fallback
-			a := &agent.Agent{Name: "fallback", Model: model.Fallback(
+			a := &agent.Agent{ID: "fallback", Name: "fallback", Model: model.Fallback(
 				model.WithRetry(&flakyModel{fails: 99}, policy),
 				&textModel{content: "backup"},
 			)}
@@ -350,7 +351,7 @@ func TestSoakFaultInjection(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			a := &agent.Agent{Name: "toolfail", Model: &loopModel{}, Tools: []tool.Tool{flakyTool}}
+			a := &agent.Agent{ID: "toolfail", Name: "toolfail", Model: &loopModel{}, Tools: []tool.Tool{flakyTool}}
 			return runner.Run(ctx, a, "ping")
 		}
 	}
@@ -403,7 +404,7 @@ func TestSoakSessions(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	hot := store.Get("hot")
 
-	chat := &agent.Agent{Name: "chat", Model: &textModel{content: "ok"}}
+	chat := &agent.Agent{ID: "chat", Name: "chat", Model: &textModel{content: "ok"}}
 
 	const workers = 8
 	runsPerWorker := n / workers
@@ -440,22 +441,22 @@ func TestSoakSessions(t *testing.T) {
 					t.Errorf("worker %d: session run %d: %v", w, i, err)
 					return
 				}
-				if _, err := sm.GetItems(ctx, 10); err != nil {
+				if _, err := sm.List(ctx, 10); err != nil {
 					t.Errorf("worker %d: sqlite get: %v", w, err)
 					return
 				}
-				if _, err := file.GetItems(ctx, 10); err != nil {
+				if _, err := file.List(ctx, 10); err != nil {
 					t.Errorf("worker %d: file get: %v", w, err)
 					return
 				}
 			}
 			for j := 0; j < churnPerWorker; j++ {
 				item := model.Message{Role: model.RoleUser, Content: fmt.Sprintf("churn %d-%d", w, j)}
-				if err := hot.AddItems(ctx, []model.Message{item}); err != nil {
-					t.Errorf("worker %d: churn add: %v", w, err)
+				if _, err := hot.Append(ctx, []model.Message{item}); err != nil {
+					t.Errorf("worker %d: churn append: %v", w, err)
 					return
 				}
-				if _, err := hot.GetItems(ctx, 5); err != nil {
+				if _, err := hot.List(ctx, 5); err != nil {
 					t.Errorf("worker %d: churn get: %v", w, err)
 					return
 				}
@@ -465,21 +466,21 @@ func TestSoakSessions(t *testing.T) {
 	wg.Wait()
 
 	// Exact write counts: concurrent runs must not lose or duplicate items.
-	items, err := mem.GetItems(ctx, -1)
+	items, err := mem.List(ctx, -1)
 	if err != nil {
 		t.Fatalf("read in-memory session: %v", err)
 	}
 	if want := 2 * runsPerWorker * workers; len(items) != want {
 		t.Errorf("in-memory session: got %d items, want %d", len(items), want)
 	}
-	items, err = store.Get("w0").GetItems(ctx, -1)
+	items, err = store.Get("w0").List(ctx, -1)
 	if err != nil {
 		t.Fatalf("read sqlite session: %v", err)
 	}
 	if want := 2 * ((runsPerWorker + 1) / 2); len(items) != want {
 		t.Errorf("sqlite session w0: got %d items, want %d", len(items), want)
 	}
-	items, err = file.GetItems(ctx, -1)
+	items, err = file.List(ctx, -1)
 	if err != nil {
 		t.Fatalf("read file session: %v", err)
 	}
@@ -487,7 +488,7 @@ func TestSoakSessions(t *testing.T) {
 		t.Errorf("file session: got %d items, want %d", len(items), want)
 	}
 	if churnPerWorker > 0 {
-		items, err = hot.GetItems(ctx, -1)
+		items, err = hot.List(ctx, -1)
 		if err != nil {
 			t.Fatalf("read hot sqlite session: %v", err)
 		}
@@ -511,7 +512,7 @@ func TestSoakCompressors(t *testing.T) {
 	comp.High, comp.Low = 20, 8
 	runner := &agent.Runner{Hooks: auditLogger, Compressor: comp}
 	sess := session.NewInMemory()
-	chat := &agent.Agent{Name: "chat", Model: &textModel{content: "ok"}}
+	chat := &agent.Agent{ID: "chat", Name: "chat", Model: &textModel{content: "ok"}}
 
 	if _, err := runner.RunWithSession(ctx, chat, sess, "warm"); err != nil {
 		t.Fatalf("warmup: %v", err)
@@ -525,7 +526,7 @@ func TestSoakCompressors(t *testing.T) {
 			t.Errorf("run %d: %v", i, err)
 		}
 	})
-	items, err := sess.GetItems(ctx, -1)
+	items, err := sess.List(ctx, -1)
 	if err != nil {
 		t.Fatalf("read session: %v", err)
 	}
@@ -547,7 +548,7 @@ func TestSoakCompressors(t *testing.T) {
 	measured := &measuringModel{inner: &textModel{content: "ok"}}
 	runner2 := &agent.Runner{Hooks: auditLogger, Compressor: window}
 	sess2 := session.NewInMemory()
-	chat2 := &agent.Agent{Name: "chat2", Model: measured}
+	chat2 := &agent.Agent{ID: "chat2", Name: "chat2", Model: measured}
 	for i := 0; i < 500; i++ {
 		if _, err := runner2.RunWithSession(ctx, chat2, sess2, fmt.Sprintf("w%d", i)); err != nil {
 			t.Fatalf("window run %d: %v", i, err)

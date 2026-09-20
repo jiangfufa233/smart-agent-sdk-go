@@ -80,6 +80,7 @@ func main() {
     })
 
     myAgent := &agent.Agent{
+        ID:           "assistant",
         Name:         "assistant",
         Instructions: "You are a concise assistant.",
         Model:        m,
@@ -137,14 +138,31 @@ res, err := r.RunWithSession(ctx, myAgent, sess, "What's my name?")
 fmt.Println(res.Output) // the model sees the previous turn
 ```
 
-**Three stores**, one interface (`GetItems` / `AddItems` / `Clear`):
+**Three stores**, one interface (`List` / `Append` / `Replace` / `Clear`):
 
 ```go
-sess := session.NewInMemory()               // in-process, lost on restart
-sess = session.NewFile("chat.jsonl")        // append-only JSONL, survives restarts
-store, err := session.NewSQLiteStore("chats.db") // one DB file, many sessions
-sess = store.Get("user-42")                 // keyed view, ids are isolated
+var sess agent.Session = session.NewInMemory()
+sess = session.NewFile("chat.jsonl") // versioned item-ID JSONL, atomic rewrites
+store, err := session.NewSQLiteStore("chats.db")
+if err != nil { panic(err) }
+defer store.Close()
+sess = store.Get("user-42")
 ```
+
+`List(ctx, limit)` returns recent items in chronological order; `limit <= 0` returns everything. `Append` and `Replace` return generated `SessionItem{ID, Message}` values. Storage IDs are independent of model `ToolCall.ID` / `ToolCallID` values.
+
+```go
+items, err := sess.List(ctx, 0)
+if err != nil { panic(err) }
+if len(items) >= 4 {
+    replacement, err := sess.Replace(ctx, items[0].ID, items[3].ID,
+        []model.Message{{Role: model.RoleUser, Content: "Summary of the first four items"}})
+    if err != nil { panic(err) }
+    fmt.Println("New item ID:", replacement[0].ID)
+}
+```
+
+`Replace` physically replaces a closed interval; passing `nil` deletes it. IDs outside the interval are preserved. Unknown or reversed IDs return `*agent.SessionRangeError` without mutation. Unlike view compression below, replaced originals are not retained. Legacy v1 JSONL and SQLite formats return `*session.FormatUpgradeError` and require explicit migration rather than mixed-format reads.
 
 **Semantics** (worth 30 seconds — each rule came from a real failure mode):
 - The run's new messages (the user input plus generated assistant/tool messages) are written back **only on success**; **failed runs never persist** — no half-finished conversations leak into the next turn.
@@ -153,7 +171,7 @@ sess = store.Get("user-42")                 // keyed view, ids are isolated
 - Sessions store the **full, lossless** history; the view sent to the model can be compressed (lesson 3).
 - Transcripts produced by handoffs go into the session as-is (the conversation can continue under the new agent, lesson 7).
 
-**Gotcha**: the SQLite DB file can be shared by multiple processes (busy_timeout and WAL are configured), but it is a single-file store — not a network database.
+**Gotcha**: the SQLite DB file can be shared by multiple processes (busy_timeout, WAL, and immediate write transactions are configured), but it is a single-file store, not a network database. A `FileSession` mutex protects only that instance: reuse one handle per JSONL file and use SQLite for concurrent multi-process writes. Atomic storage operations do not make the entire load/run/persist cycle atomic; applications must serialize turns within the same conversation.
 
 ## 3. History compression
 
@@ -180,6 +198,30 @@ How `Summarizer` saves money:
 - The summary cache lives on the `Summarizer` instance: **reusing the same Runner reuses the cache**; a new Runner re-summarizes from scratch.
 - A larger `High−Low` gap means fewer summarizer calls but coarser folds. 50/20 is a solid start.
 - Compression only changes the view; audit (lesson 9) records the compressed request view, while the session always keeps the full transcript.
+
+### Offline token counting and manual compression
+
+```go
+counter, err := tokenizer.NewCL100K()
+if err != nil { panic(err) }
+textTokens, err := counter.CountText("cl100k_base", "Hello, world!")
+if err != nil { panic(err) }
+items, err := sess.List(ctx, 0)
+if err != nil { panic(err) }
+messages := make([]model.Message, len(items))
+for i, item := range items { messages[i] = item.Message }
+estimate, err := counter.CountMessages("gpt-4-0613", messages)
+if err != nil { panic(err) }
+fmt.Println(textTokens, estimate)
+```
+
+`tokenizer` is an optional package at `github.com/jiangfufa233/smart-agent-sdk-go/tokenizer`. Its vocabulary is embedded, startup never downloads it, and instances support concurrent reuse. Inject your provider's own `model.TokenCounter` when necessary. The SDK neither rewrites history based on estimates nor mixes local counts into provider `Usage`.
+
+- `CountText` applies cl100k_base BPE to valid UTF-8. Special-token-looking strings are ordinary text; invalid UTF-8 returns `tokenizer.ErrInvalidUTF8`.
+- `CountMessages` supports the 0301/0613/1106/0125 and 16k-0613 GPT-3.5 Turbo snapshots, and the 0314/0613 GPT-4 / GPT-4-32k snapshots. The `gpt-3.5-turbo` and `gpt-4` aliases use 0125 and 0613 rules respectively. Unknown names, including GPT-4o, return `model.ErrUnsupportedTokenModel`. The bare `cl100k_base` encoding has no message framing and is accepted only by `CountText`.
+- Message estimates include role, name, text, tool IDs/types/names/raw arguments/results. `Parts` supersedes `Content`, and `Extra` is counted as compact JSON. Messages add 3 framing tokens and names add 1; the 0301 snapshot uses 4 and −1. The reply prefix adds 3. Each tool call and content part adds another 3 **local estimate** tokens, not a provider billing rule.
+- Image/audio processing, tool definitions, hidden reasoning, and provider-specific framing are not exactly accounted for by this message interface. Leave headroom in context budgets; use response `Usage` for reported consumption.
+- Licensing and vocabulary provenance are recorded in `tokenizer/NOTICE`. Offline Go tests check 886 text vectors generated by official tiktoken 0.12.0.
 
 ## 4. Function tools
 
@@ -235,8 +277,13 @@ for ev := range run.Events {
         fmt.Print(ev.Text)
     case agent.StreamToolCallStarted, agent.StreamToolCallArgs, agent.StreamToolResult:
         // live tool progress (ev.Call / ev.Result / ev.ToolErr)
+    case agent.StreamReasoningDelta:
+        // observable-only reasoning; never enters output, session, or tool transcript
+        fmt.Print(ev.Reasoning)
     case agent.StreamHandoff:
-        fmt.Printf("\n[handoff %s -> %s]\n", ev.FromAgent, ev.ToAgent)
+        fmt.Printf("\n[handoff %s -> %s]\n", ev.From.Name, ev.To.Name)
+    case agent.StreamTaskStarted, agent.StreamTaskCompleted, agent.StreamTaskFailed:
+        // isolated child task lifecycle; use ev.Agent / ev.Task for UI correlation
     case agent.StreamFinalOutput: // terminal: full text + usage
         fmt.Printf("\n[done, %d tokens]\n", ev.Usage.TotalTokens)
     case agent.StreamRunError: // terminal: failure
@@ -246,7 +293,7 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
-Full event set: `StreamRunStarted` / `StreamTextDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamToolResult` / `StreamHandoff` / `StreamFinalOutput` / `StreamRunError`.
+Full event set: `StreamRunStarted` / `StreamTaskStarted` / `StreamTextDelta` / `StreamReasoningDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamToolResult` / `StreamHandoff` / `StreamTaskCompleted` / `StreamTaskFailed` / `StreamTaskSkipped` / `StreamFinalOutput` / `StreamRunError`.
 
 **Key points**:
 - **Exactly one terminal event**: `StreamFinalOutput` or `StreamRunError`, followed by channel close. Two correct consumption patterns: range until close, or `run.Wait()` (drains and returns the result).
@@ -292,11 +339,13 @@ fmt.Printf("%s %.1fC sunny=%v\n", typed.Value.City, typed.Value.TempC, typed.Val
 
 ```go
 researcher := &agent.Agent{
+    ID:           "researcher",
     Name:         "researcher",
     Instructions: "You are a research specialist; dig deep and give structured conclusions.",
     Model:        m,
 }
 triage := &agent.Agent{
+    ID:           "triage",
     Name:         "triage",
     Instructions: "You triage: answer simple questions; hand research questions to researcher.",
     Model:        m,
@@ -308,23 +357,53 @@ fmt.Println(res.Transfers)   // [researcher]
 fmt.Println(res.Agent.Name)  // researcher — it produced the final answer
 ```
 
-**Nested delegation (agent-as-tool)**: the subtask runs as its own run; only the final answer returns to the caller:
+**Isolated delegation (`Delegate`)**: the subtask runs independently while the caller retains control; its final answer is fed back as a tool result. During streaming, child text, reasoning, and tool events are forwarded into the root stream under a dedicated `TaskRef`:
 
 ```go
-subTool, err := handoff.AsTool(researcher, agent.NewRunner())
+subTool, err := handoff.Delegate(researcher, agent.NewRunner())
 triage.Tools = append(triage.Tools, subTool)
 ```
 
 | Need | Use |
 |------|-----|
 | The conversation should **change hands** (the user keeps talking to the new agent) | Handoff |
-| You only need the **subtask's result** (the caller keeps talking with the result in hand) | AsTool |
+| You only need the **subtask's result** (the caller keeps talking with the result in hand) | Delegate |
 
 **Key points**:
-- The target agent must have a `Model` (validation rejects nil); a handoff tool colliding with a regular tool name is an error.
-- `MaxTurns` bounds model calls **across all** agents, preventing A↔B ping-pong.
-- In streaming, handoffs emit `StreamHandoff` events (`FromAgent`/`ToAgent`); implementing the optional `agent.HandoffHook` also surfaces them as callbacks.
-- Post-handoff transcripts enter the session as-is (lesson 2), so the conversation continues under the new agent.
+- Every agent needs a stable `ID`, a display `Name`, and a `Model`; duplicate tool and handoff names are errors.
+- First-class handoffs share the current run's `MaxTurns`; isolated delegation has the independent budget, transcript, and session of its child runner.
+- Streaming handoffs emit `StreamHandoff` (`From`/`To`); isolated delegation emits `StreamTaskStarted`, child events, and `StreamTaskCompleted`/`StreamTaskFailed`. Every event carries `AgentRef` and `TaskRef`, while the root stream has one terminal event.
+- A first-class handoff persists its shared transcript to the session (lesson 2); an isolated delegation never mixes in the child's private transcript.
+
+### Workflow orchestration (the workflow package)
+
+**When you need it**: the task graph is decided **by your code** up front — research and stats in parallel, then a report synthesizing both — instead of letting the model choose the next step. Handoffs and Delegate hand scheduling to the model; `workflow` keeps it with you.
+
+```go
+wf := workflow.NewRunner(agent.NewRunner())
+
+plan := workflow.Parallel(2,
+    workflow.Task{ID: "research", Agent: researcher, Input: "Research Go generics practices"},
+    workflow.Task{ID: "stats", Agent: statsAgent, Input: "Collect adoption data"},
+)
+plan.Tasks = append(plan.Tasks, workflow.Task{
+    ID: "report", Agent: writer, DependsOn: []string{"research", "stats"},
+    BuildInput: func(ctx context.Context, res workflow.Results) (string, error) {
+        return "Write a report from:\n" + res["research"].Result.Output + "\n" + res["stats"].Result.Output, nil
+    },
+})
+
+res, err := wf.Run(ctx, plan).Wait() // results only; range over run.Events to observe live
+fmt.Println(res.Tasks["report"].Result.Output)
+```
+
+`workflow.Sequence(a, b, c)` chains dependencies in declaration order; for arbitrary DAGs build `Plan{Tasks: ..., MaxParallel: n}` and write `DependsOn` yourself.
+
+**Key points**:
+- `Task{ID, Agent, Input, DependsOn, BuildInput, Session}`; self-dependencies, repeated dependencies, unknown dependencies, and cycles are all rejected by `Run`. `BuildInput` runs synchronously in the scheduling loop (it receives a snapshot of its completed dependency results), should honor ctx and return quickly; an error fails the task.
+- Each task is an independent agent run: `run.Events` delivers `StreamTaskStarted/Completed/Failed/Skipped` plus forwarded child events, each tagged with `TaskID/ParentTaskID/RootRunID`, and the root stream has exactly one terminal event; `Wait()` drains the event channel before returning the aggregate result — use it when you only need results.
+- Failure semantics: the default `Continue` marks downstream tasks of a failure as `Skipped` (`TaskResult.Skipped`) while unrelated branches proceed; `workflow.FailFast` cancels the whole plan on the first failure (running tasks get canceled, pending tasks are marked `Skipped`, and the cancel cause becomes `Wait`'s error). `run.Cancel(cause)` cancels manually at any time with the same semantics.
+- Sessions: `Task.Session` gives a task private history; a session may only appear across tasks that depend on each other (concurrent sharing without dependencies is rejected by `Run`), and dependent sharing serializes along the DAG.
 
 ## 8. Guardrails
 
@@ -443,10 +522,30 @@ c, err := mcp.NewClient(mcp.Config{
 })
 ```
 
+**Authenticated remote services**: HTTP headers support the strict templates `{username}`, `{group}`, and `${token}`; values come from `HeaderProvider` on **every request** (token rotation takes effect immediately, no reconnect needed):
+
+```go
+c, err := mcp.NewClient(mcp.Config{
+    Transport: mcp.TransportHTTP,
+    URL:       "https://mcp.example.com/mcp",
+    HTTPHeaders: http.Header{
+        "Authorization": {"Bearer ${token}"},
+        "X-Acting-User": {"{username}"},
+    },
+    HeaderProvider: func(ctx context.Context) (mcp.HeaderValues, error) {
+        return mcp.HeaderValues{Username: "alice", Token: refreshToken(ctx)}, // your credential logic
+    },
+})
+```
+
+For enterprise OAuth, use `OAuthHandler` (passed through to the official go-sdk, which handles 401/403 retries); it is mutually exclusive with a manual `Authorization` header, and configuring both is rejected by `NewClient`.
+
 **Semantics**:
 - Remote tool inputSchemas pass through to the model untouched; results are flattened to text (binaries become size placeholders); a server-side `IsError` maps to a tool error fed back to the model.
 - `Config.Policy` authorizes **every** remote call (reuses `tool.Policy`): a denial sends nothing and reports the reason back to the model. For human approval, implement a custom `Policy` (show a confirmation in the callback).
 - Authorization denials don't fail the run — they land in `res.ToolErrors`, and the model sees "denied, and why".
+- Template variables are a strict whitelist: unknown variables fail in `NewClient`; an empty provider value fails the request (incomplete credentials are never sent), and the provider's error text never reaches results (it could contain a rendered secret).
+- Dynamic credentials never follow redirects to another origin: cross-origin requests are refused.
 
 ## 11. Resilience (retry, timeout, rate limit, fallback)
 
@@ -514,6 +613,7 @@ m := testutil.NewScripted(
 )
 
 res, err := agent.NewRunner().Run(ctx, &agent.Agent{
+    ID: "weather-test", Name: "Weather Test",
     Model: m, Tools: []tool.Tool{weatherTool},
 }, "Weather in Beijing?")
 // res.Output == "done"
@@ -533,7 +633,7 @@ sm := testutil.NewScriptedStream(testutil.StreamStep{
     FinishReason: "stop",
 })
 // sm implements both model.Model and model.StreamModel
-run := agent.NewRunner().RunStream(ctx, &agent.Agent{Model: sm}, "hi")
+run := agent.NewRunner().RunStream(ctx, &agent.Agent{ID: "stream-test", Name: "Stream Test", Model: sm}, "hi")
 res, err := run.Wait()
 ```
 
@@ -566,6 +666,7 @@ reader, err := builtins.NewFileTool(builtins.FileConfig{
 })
 
 a := &agent.Agent{
+    ID:    "ops",
     Name:  "ops",
     Model: model, // any model.Model
     Tools: []tool.Tool{shell, reader},
@@ -581,17 +682,19 @@ _, err := shell.Run(ctx, `{"command":"rm -rf /data"}`)
 // err: tool "shell" denied by policy: command matches deny rule "..."
 ```
 
-The second layer is approval: wrap with `tool.WithPolicy` from lesson 4; a human-in-the-loop policy blocks synchronously until a person decides:
+The second layer is approval: `tool.RequireApproval` blocks after the model requests a tool and before execution. Its `Approver` receives the tool name, description, and raw JSON arguments, so it can correlate an external UI or queue decision:
 
 ```go
-approved := tool.WithPolicy(shell, tool.PolicyFunc(func(ctx context.Context, call tool.ToolCall) error {
-    var args struct{ Command string `json:"command"` }
-    json.Unmarshal([]byte(call.Arguments), &args)
-    return askHuman(ctx, args.Command) // nil allows, error denies
-}))
+approved := tool.WithPolicy(shell, tool.RequireApproval(
+    tool.ApproverFunc(func(ctx context.Context, req tool.ApprovalRequest) (bool, error) {
+        return waitForHumanDecision(ctx, req) // allow, deny, or ctx cancellation
+    }),
+    "shell", // require approval only for shell; omit names to guard every tool
+))
 ```
 
 **Key points**:
+- **Approval is a synchronous block, fail-closed**: an `Approver` error, a denial, a missing approver, or a canceled context denies the call; an approval that arrives after ctx cancellation is also a denial (nothing executes).
 - **Fail-closed all the way down**: `sandbox.Auto` errors out on kernels without Landlock (Linux ≥ 5.13; denying network needs ABI v4, kernel ≥ 6.7), and `NewShellTool` refuses to register without a sandbox. Only an explicit `Config.Lax=true` downgrades, and `sb.Capabilities()` then reports honestly which restrictions actually took effect.
 - **The sandbox is the security boundary; deny rules are just a guardrail**: they catch obvious mistakes and are trivially bypassed (rename `rm`); the real defense is Landlock — writes outside the workspace and any networking are denied by the kernel, continuously verified by the escape test matrix (reading `/etc`, symlink escapes, dialing, timeout tree-kill) in CI.
 - **It cannot stop prompt-injected but legitimate operations**: a model tricked into writing a malicious file inside the workspace is not stopped by the sandbox — that threat class is handled by `WithPolicy` approval plus the audit trail.

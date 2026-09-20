@@ -89,6 +89,26 @@ func TestAuthHeader(t *testing.T) {
 	_, _ = c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}})
 }
 
+func TestCustomHeadersAreClonedAndAPIKeyWins(t *testing.T) {
+	headers := http.Header{"X-Relay-Group": {"research"}, "Authorization": {"Bearer stale"}}
+	var c *Client
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Relay-Group"); got != "research" {
+			t.Errorf("relay header = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer fresh" {
+			t.Errorf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(okBody()))
+	}))
+	defer ts.Close()
+	c = New(Config{APIKey: "fresh", BaseURL: ts.URL, DefaultModel: "gpt-test", Headers: headers})
+	headers.Set("X-Relay-Group", "mutated")
+	if _, err := c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleUser, Content: "x"}}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSuccessParse(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(okBody()))
@@ -105,6 +125,36 @@ func TestSuccessParse(t *testing.T) {
 	}
 	if res.Usage.PromptTokens != 5 || res.Usage.PromptTokensDetails.CachedTokens != 3 {
 		t.Fatalf("usage wrong: %+v", res.Usage)
+	}
+}
+
+func TestResponsesChat(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var got map[string]any
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["stream"] != nil || got["model"] != "gpt-responses" {
+			t.Fatalf("request = %s", body)
+		}
+		input, _ := got["input"].([]any)
+		if len(input) != 2 || input[1].(map[string]any)["type"] != "message" {
+			t.Fatalf("input = %#v", got["input"])
+		}
+		_, _ = w.Write([]byte(`{"id":"resp_1","model":"gpt-responses","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`))
+	}))
+	defer ts.Close()
+	c := New(Config{BaseURL: ts.URL, DefaultModel: "gpt-responses", Protocol: ProtocolResponses})
+	res, err := c.Chat(context.Background(), &model.Request{Messages: []model.Message{{Role: model.RoleSystem, Content: "sys"}, {Role: model.RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ID != "resp_1" || res.Message.Content != "hello" || len(res.Message.ToolCalls) != 1 || res.Message.ToolCalls[0].ID != "call_1" || res.Message.ToolCalls[0].Function.Name != "lookup" || res.FinishReason != "tool_calls" || res.Usage.TotalTokens != 7 {
+		t.Fatalf("response = %+v", res)
 	}
 }
 
