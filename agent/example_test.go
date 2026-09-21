@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // This example runs a minimal agent against a scripted in-process model.

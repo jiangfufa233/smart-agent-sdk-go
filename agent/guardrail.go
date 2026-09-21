@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/tracing"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tracing"
 )
 
 // GuardrailStage identifies which run phase a guardrail belongs to.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
 )
 
 func evalInput(t *testing.T, g agent.InputGuardrail, input string) (agent.GuardrailResult, error) {

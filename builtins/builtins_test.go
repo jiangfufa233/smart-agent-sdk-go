@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/sandbox"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/sandbox"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 func TestDefaultDenyRules(t *testing.T) {

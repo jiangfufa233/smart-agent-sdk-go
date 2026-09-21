@@ -54,8 +54,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model/openai"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model/openai"
 )
 
 func main() {

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/testutil"
 )
 
 // fakeSession records whole-turn writebacks and can fail loads or writes.

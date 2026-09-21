@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // SessionItem is one persisted message with a stable session-local ID.

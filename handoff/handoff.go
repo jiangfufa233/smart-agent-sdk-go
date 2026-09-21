@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 // New returns a first-class Handoff to target. Assign it to an Agent's

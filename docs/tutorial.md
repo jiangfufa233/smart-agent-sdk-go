@@ -50,7 +50,7 @@ m := openai.New(openai.Config{
 })
 ```
 
-**怎么跑课程代码**：第 1 课给出完整的 `main.go`，之后每课只给关键片段——把片段放进第 1 课的骨架（`main` 函数内）即可运行。涉及的标准库 import 按需补齐；SDK 包统一来自 `github.com/jiangfufa233/smart-agent-sdk-go/...`。
+**怎么跑课程代码**：第 1 课给出完整的 `main.go`，之后每课只给关键片段——把片段放进第 1 课的骨架（`main` 函数内）即可运行。涉及的标准库 import 按需补齐；SDK 包统一来自 `github.com/jiangfufa233/smart-agent-sdk-go/v2/...`。
 
 **可运行的完整示例**在仓库 `examples/` 目录：`chat`（多轮对话）、`tools`（工具调用）、`mcp`（MCP 接入）、`offline`（离线冒烟，覆盖全部特性，无网络可跑）。
 
@@ -67,8 +67,8 @@ import (
     "log"
     "os"
 
-    "github.com/jiangfufa233/smart-agent-sdk-go/agent"
-    "github.com/jiangfufa233/smart-agent-sdk-go/model/openai"
+    "github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+    "github.com/jiangfufa233/smart-agent-sdk-go/v2/model/openai"
 )
 
 func main() {
@@ -221,7 +221,7 @@ if err != nil { panic(err) }
 fmt.Println(textTokens, estimate)
 ```
 
-`tokenizer` 是独立可选包，导入路径为 `github.com/jiangfufa233/smart-agent-sdk-go/tokenizer`。词表内嵌，启动不下载；实例可并发复用。`model.TokenCounter` 可替换为内部 provider 的实现。SDK 不按估算自动改写历史，也不把本地计数写进 provider `Usage`。
+`tokenizer` 是独立可选包，导入路径为 `github.com/jiangfufa233/smart-agent-sdk-go/v2/tokenizer`。词表内嵌，启动不下载；实例可并发复用。`model.TokenCounter` 可替换为内部 provider 的实现。SDK 不按估算自动改写历史，也不把本地计数写进 provider `Usage`。
 
 - `CountText` 对有效 UTF-8 使用 cl100k_base BPE；特殊 token 外观的字符串按普通文本计数，非法 UTF-8 返回 `tokenizer.ErrInvalidUTF8`。
 - `CountMessages` 支持 `gpt-3.5-turbo` 的 0301/0613/1106/0125、16k-0613，以及 `gpt-4` / `gpt-4-32k` 的 0314/0613 快照。别名 `gpt-3.5-turbo`、`gpt-4` 分别采用 0125、0613 规则。不支持的名称（包括 GPT-4o）返回 `model.ErrUnsupportedTokenModel`；裸 `cl100k_base` 没有消息封装规则，只能用于 `CountText`。

@@ -9,7 +9,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 const modulePath = "github.com/jiangfufa233/smart-agent-sdk-go"

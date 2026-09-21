@@ -16,11 +16,11 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
-	"github.com/jiangfufa233/smart-agent-sdk-go/mcp"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/mcp"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/testutil"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 func main() {

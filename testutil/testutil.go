@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // ErrScriptExhausted is returned when Chat is called more times than the

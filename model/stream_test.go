@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 func TestNewStreamFromResponse(t *testing.T) {

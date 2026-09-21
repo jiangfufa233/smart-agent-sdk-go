@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 func TestScriptedStreamChatMaterializesDeltas(t *testing.T) {

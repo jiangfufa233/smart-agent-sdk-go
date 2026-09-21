@@ -36,8 +36,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/sandbox"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/sandbox"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 // maxEchoBytes caps how much of a command's output the model sees.

@@ -1,4 +1,4 @@
-module github.com/jiangfufa233/smart-agent-sdk-go
+module github.com/jiangfufa233/smart-agent-sdk-go/v2
 
 go 1.25.0
 

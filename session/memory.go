@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // InMemory is a Session backed by a slice, guarded by a mutex. Messages and

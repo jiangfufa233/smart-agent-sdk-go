@@ -50,7 +50,7 @@ m := openai.New(openai.Config{
 })
 ```
 
-**Running the snippets**: lesson 1 gives a complete `main.go`; later lessons only show key fragments — paste them into that skeleton (inside `main`). Add standard-library imports as needed; SDK packages all come from `github.com/jiangfufa233/smart-agent-sdk-go/...`.
+**Running the snippets**: lesson 1 gives a complete `main.go`; later lessons only show key fragments — paste them into that skeleton (inside `main`). Add standard-library imports as needed; SDK packages all come from `github.com/jiangfufa233/smart-agent-sdk-go/v2/...`.
 
 **Runnable examples** live in the repo's `examples/` directory: `chat` (multi-turn dialogue), `tools` (tool calls), `mcp` (MCP integration), `offline` (offline smoke test covering every feature, no network needed).
 
@@ -67,8 +67,8 @@ import (
     "log"
     "os"
 
-    "github.com/jiangfufa233/smart-agent-sdk-go/agent"
-    "github.com/jiangfufa233/smart-agent-sdk-go/model/openai"
+    "github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+    "github.com/jiangfufa233/smart-agent-sdk-go/v2/model/openai"
 )
 
 func main() {
@@ -215,7 +215,7 @@ if err != nil { panic(err) }
 fmt.Println(textTokens, estimate)
 ```
 
-`tokenizer` is an optional package at `github.com/jiangfufa233/smart-agent-sdk-go/tokenizer`. Its vocabulary is embedded, startup never downloads it, and instances support concurrent reuse. Inject your provider's own `model.TokenCounter` when necessary. The SDK neither rewrites history based on estimates nor mixes local counts into provider `Usage`.
+`tokenizer` is an optional package at `github.com/jiangfufa233/smart-agent-sdk-go/v2/tokenizer`. Its vocabulary is embedded, startup never downloads it, and instances support concurrent reuse. Inject your provider's own `model.TokenCounter` when necessary. The SDK neither rewrites history based on estimates nor mixes local counts into provider `Usage`.
 
 - `CountText` applies cl100k_base BPE to valid UTF-8. Special-token-looking strings are ordinary text; invalid UTF-8 returns `tokenizer.ErrInvalidUTF8`.
 - `CountMessages` supports the 0301/0613/1106/0125 and 16k-0613 GPT-3.5 Turbo snapshots, and the 0314/0613 GPT-4 / GPT-4-32k snapshots. The `gpt-3.5-turbo` and `gpt-4` aliases use 0125 and 0613 rules respectively. Unknown names, including GPT-4o, return `model.ErrUnsupportedTokenModel`. The bare `cl100k_base` encoding has no message framing and is accepted only by `CountText`.

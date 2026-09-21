@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/testutil"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/testutil"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 	"go.uber.org/goleak"
 )
 

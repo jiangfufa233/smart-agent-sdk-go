@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // SlidingWindow keeps the leading system messages plus the most recent Keep

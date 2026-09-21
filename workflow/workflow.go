@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
 )
 
 // FailureMode controls how the workflow reacts when a task fails.

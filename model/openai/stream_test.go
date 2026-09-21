@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // sseServer returns a test server that streams the given raw SSE text with

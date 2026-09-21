@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 // StructuredOutputError reports that the final output of a run could not be

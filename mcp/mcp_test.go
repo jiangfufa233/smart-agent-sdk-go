@@ -16,7 +16,7 @@ import (
 	"go.uber.org/goleak"
 	"golang.org/x/oauth2"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 func TestMain(m *testing.M) {

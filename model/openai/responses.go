@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model/sse"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model/sse"
 )
 
 type responsesRequest struct {

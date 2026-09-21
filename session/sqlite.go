@@ -8,8 +8,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // SQLiteStore is a keyed multi-session store backed by a SQLite database

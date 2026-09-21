@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hupe1980/go-tiktoken"
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 var ErrInvalidUTF8 = errors.New("tokenizer: input is not valid UTF-8")

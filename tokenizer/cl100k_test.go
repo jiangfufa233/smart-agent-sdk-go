@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
-	"github.com/jiangfufa233/smart-agent-sdk-go/tokenizer"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tokenizer"
 )
 
 func TestCL100KTextVectors(t *testing.T) {

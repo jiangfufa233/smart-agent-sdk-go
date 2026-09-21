@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/tool"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/tool"
 )
 
 // DelegatedTool is an optional tool extension recognized by Runner. It keeps

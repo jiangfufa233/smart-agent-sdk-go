@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/model"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // StreamStep scripts one streaming model call.

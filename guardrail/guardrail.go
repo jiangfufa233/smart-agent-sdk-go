@@ -34,7 +34,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/jiangfufa233/smart-agent-sdk-go/agent"
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/agent"
 )
 
 // DenyPatterns returns an input guardrail that trips when the input matches

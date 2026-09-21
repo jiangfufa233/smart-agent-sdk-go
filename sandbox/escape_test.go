@@ -18,7 +18,7 @@ func TestMain(m *testing.M) {
 	// Each Sandbox keeps one dedicated, permanently parked spawn thread
 	// (see parkForever); it is a deliberate part of the design.
 	goleak.VerifyTestMain(m,
-		goleak.IgnoreTopFunction("github.com/jiangfufa233/smart-agent-sdk-go/sandbox.parkForever"))
+		goleak.IgnoreTopFunction("github.com/jiangfufa233/smart-agent-sdk-go/v2/sandbox.parkForever"))
 }
 
 // Helper-process support: the tests below re-execute the test binary
