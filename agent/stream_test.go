@@ -320,6 +320,27 @@ func TestRunStreamMaxTurns(t *testing.T) {
 	if !errors.Is(evs[len(evs)-1].Err, ErrMaxTurns) {
 		t.Fatalf("terminal event err = %v", evs[len(evs)-1].Err)
 	}
+	var mte *MaxTurnsError
+	if !errors.As(err, &mte) {
+		t.Fatalf("expected *MaxTurnsError, got %v", err)
+	}
+	// The streaming path exposes the same resumable transcript as the
+	// non-streaming loop: new user input plus each assistant/tool pair.
+	assertMsgs(t, mte.Messages,
+		model.Message{Role: model.RoleUser, Content: "hi"},
+		model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+			ID: "c", Function: model.FunctionCall{Name: "get_weather", Arguments: "{}"},
+		}}},
+		model.Message{Role: model.RoleTool, ToolCallID: "c", Name: "get_weather", Content: `{"temp_c":21}`},
+		model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+			ID: "c", Function: model.FunctionCall{Name: "get_weather", Arguments: "{}"},
+		}}},
+		model.Message{Role: model.RoleTool, ToolCallID: "c", Name: "get_weather", Content: `{"temp_c":21}`},
+	)
+	var evErr *MaxTurnsError
+	if !errors.As(evs[len(evs)-1].Err, &evErr) || len(evErr.Messages) != len(mte.Messages) {
+		t.Fatalf("terminal event lost MaxTurnsError messages: %+v", evs[len(evs)-1].Err)
+	}
 }
 
 func TestRunStreamMidStreamError(t *testing.T) {

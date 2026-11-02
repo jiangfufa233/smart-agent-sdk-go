@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-11-02
+
+### Added
+
+- `agent.MaxTurnsError` now carries `Messages []model.Message`: everything the
+  failed run produced after the history it started from (the user input
+  followed by the assistant and tool messages generated in response, in
+  request order). It is exactly the slice a successful run would have
+  persisted with `Session.Append`, so callers can keep the partial
+  tool-call transcript and resume instead of losing it. Both the streaming
+  and non-streaming loops populate it; the failed run itself still writes
+  nothing to the session.
+
 ## [2.0.0] - 2026-09-20
 
 ### Added

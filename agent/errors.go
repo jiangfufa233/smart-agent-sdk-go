@@ -3,6 +3,8 @@ package agent
 import (
 	"errors"
 	"fmt"
+
+	"github.com/jiangfufa233/smart-agent-sdk-go/v2/model"
 )
 
 // ErrMaxTurns is the sentinel matched by errors.Is when a run exhausts its
@@ -10,7 +12,17 @@ import (
 var ErrMaxTurns = errors.New("agent: max turns exceeded")
 
 // MaxTurnsError reports the configured budget that was exhausted.
-type MaxTurnsError struct{ MaxTurns int }
+//
+// Messages holds everything the failed run produced after the history it
+// started from: the user input followed by the assistant and tool messages
+// generated in response, in request order. It is exactly the slice a
+// successful run would have persisted with Session.Append, so a caller can
+// carry the conversation forward by appending it to the same session and
+// starting a new run.
+type MaxTurnsError struct {
+	MaxTurns int
+	Messages []model.Message
+}
 
 func (e *MaxTurnsError) Error() string {
 	return fmt.Sprintf("agent: max turns exceeded (%d)", e.MaxTurns)

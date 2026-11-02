@@ -231,6 +231,43 @@ func TestMaxTurnsTypedError(t *testing.T) {
 	}
 }
 
+func TestMaxTurnsErrorCarriesNewMessages(t *testing.T) {
+	m := model.ModelFunc(func(ctx context.Context, req *model.Request) (*model.Response, error) {
+		return testutil.ToolCallStep("c1", "get_weather", "{}").Resp, nil
+	})
+	a := newAgent(m, weatherTool())
+	history := []model.Message{
+		{Role: model.RoleUser, Content: "earlier"},
+		{Role: model.RoleAssistant, Content: "earlier reply"},
+	}
+	r := &Runner{MaxTurns: 2}
+	_, err := r.RunWithHistory(context.Background(), a, history, "next")
+	var mte *MaxTurnsError
+	if !errors.As(err, &mte) {
+		t.Fatalf("expected *MaxTurnsError, got %v", err)
+	}
+	// Loaded history (including the instructions system message) is not
+	// repeated: Messages starts at the new user input and holds every
+	// assistant/tool message the run produced, in request order.
+	if len(mte.Messages) != 5 {
+		t.Fatalf("Messages has %d entries, want 5: %+v", len(mte.Messages), mte.Messages)
+	}
+	assertMsgs(t, mte.Messages,
+		model.Message{Role: model.RoleUser, Content: "next"},
+		model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+			ID: "c1", Function: model.FunctionCall{Name: "get_weather", Arguments: "{}"},
+		}}},
+		model.Message{Role: model.RoleTool, ToolCallID: "c1", Name: "get_weather", Content: `{"temp_c":21}`},
+		model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+			ID: "c1", Function: model.FunctionCall{Name: "get_weather", Arguments: "{}"},
+		}}},
+		model.Message{Role: model.RoleTool, ToolCallID: "c1", Name: "get_weather", Content: `{"temp_c":21}`},
+	)
+	if got := mte.Messages[1].ToolCalls[0].Function.Name; got != "get_weather" {
+		t.Fatalf("assistant tool call = %q, want get_weather", got)
+	}
+}
+
 func TestSettingsPassthrough(t *testing.T) {
 	temp := 0.7
 	m := testutil.NewScripted(testutil.Step{Func: func(req *model.Request) (*model.Response, error) {

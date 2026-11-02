@@ -286,6 +286,50 @@ func TestRunStreamWithSessionLoadErrorSingleTerminal(t *testing.T) {
 	}
 }
 
+func TestMaxTurnsMessagesCanBePersistedAndResumed(t *testing.T) {
+	ctx := context.Background()
+	s := &fakeSession{}
+	m := testutil.NewScripted(
+		testutil.ToolCallStep("c1", "get_weather", "{}"),
+		testutil.ToolCallStep("c2", "get_weather", "{}"),
+		testutil.TextStep("sunny"),
+	)
+	a := newAgent(m, weatherTool())
+	r := &Runner{MaxTurns: 2}
+
+	_, err := r.RunWithSession(ctx, a, s, "weather?")
+	var mte *MaxTurnsError
+	if !errors.As(err, &mte) {
+		t.Fatalf("expected *MaxTurnsError, got %v", err)
+	}
+	if len(s.adds) != 0 {
+		t.Fatalf("failed run wrote to the session: %+v", s.adds)
+	}
+
+	// The caller decides to keep the partial transcript and resume.
+	if _, err := s.Append(ctx, mte.Messages); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	res, err := r.RunWithSession(ctx, a, s, "continue")
+	if err != nil {
+		t.Fatalf("resume run: %v", err)
+	}
+	if res.Output != "sunny" {
+		t.Fatalf("output = %q", res.Output)
+	}
+	// The resumed model call sees the persisted tool transcript, so the
+	// conversation continues instead of restarting.
+	assertMsgs(t, m.LastRequest().Messages,
+		model.Message{Role: model.RoleSystem, Content: "sys"},
+		model.Message{Role: model.RoleUser, Content: "weather?"},
+		model.Message{Role: model.RoleAssistant, ToolCalls: make([]model.ToolCall, 1)},
+		model.Message{Role: model.RoleTool, ToolCallID: "c1", Name: "get_weather", Content: `{"temp_c":21}`},
+		model.Message{Role: model.RoleAssistant, ToolCalls: make([]model.ToolCall, 1)},
+		model.Message{Role: model.RoleTool, ToolCallID: "c2", Name: "get_weather", Content: `{"temp_c":21}`},
+		model.Message{Role: model.RoleUser, Content: "continue"},
+	)
+}
+
 func TestRunStreamWithSessionWritebackErrorSingleTerminal(t *testing.T) {
 	run := NewRunner().RunStreamWithSession(context.Background(),
 		&Agent{ID: "session", Name: "session", Model: testutil.NewScriptedStream(testutil.StreamStep{

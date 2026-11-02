@@ -323,7 +323,7 @@ func (r *Runner) loop(ctx context.Context, a *Agent, history []model.Message, in
 			cur = next
 		}
 	}
-	return nil, &MaxTurnsError{MaxTurns: opts.maxTurns}
+	return nil, &MaxTurnsError{MaxTurns: opts.maxTurns, Messages: msgs[len(history):]}
 }
 
 // execTool invokes one tool and always returns the text to feed back to the

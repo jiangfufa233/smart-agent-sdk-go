@@ -365,7 +365,7 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 			cur = next
 		}
 	}
-	return nil, cur, &MaxTurnsError{MaxTurns: opts.maxTurns}
+	return nil, cur, &MaxTurnsError{MaxTurns: opts.maxTurns, Messages: msgs[len(history):]}
 }
 
 // streamTurn performs one model call, streaming when the model supports it
