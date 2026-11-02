@@ -290,7 +290,10 @@ for ev := range run.Events {
         fmt.Printf("\n[转交 %s -> %s]\n", ev.From.Name, ev.To.Name)
     case agent.StreamTaskStarted, agent.StreamTaskCompleted, agent.StreamTaskFailed:
         // 隔离 child task 生命周期；ev.Agent / ev.Task 用于 UI 关联
-    case agent.StreamFinalOutput: // 终态：全文 + 用量
+    case agent.StreamUsage:
+        // 每轮模型调用结束即发布：ev.TurnUsage 本轮，ev.Usage 累计
+        fmt.Printf("\n[本轮 %d tokens，累计 %d]", ev.TurnUsage.TotalTokens, ev.Usage.TotalTokens)
+    case agent.StreamFinalOutput: // 终态：全文 + 累计用量
         fmt.Printf("\n[完成，%d tokens]\n", ev.Usage.TotalTokens)
     case agent.StreamRunError: // 终态：失败
         log.Printf("run 失败: %v", ev.Err)
@@ -299,10 +302,11 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
-事件类型全集：`StreamRunStarted` / `StreamTaskStarted` / `StreamTextDelta` / `StreamReasoningDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamToolResult` / `StreamHandoff` / `StreamTaskCompleted` / `StreamTaskFailed` / `StreamTaskSkipped` / `StreamFinalOutput` / `StreamRunError`。
+事件类型全集：`StreamRunStarted` / `StreamTaskStarted` / `StreamTextDelta` / `StreamReasoningDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamUsage` / `StreamToolResult` / `StreamHandoff` / `StreamTaskCompleted` / `StreamTaskFailed` / `StreamTaskSkipped` / `StreamFinalOutput` / `StreamRunError`。
 
 **要点**：
 - **终态事件恰好一个**：`StreamFinalOutput` 或 `StreamRunError`，随后 channel 关闭。两种正确消费姿势：range 到关闭，或 `run.Wait()`（自动排干并返回结果）。
+- **用量的实时反馈**：每轮模型调用结束都会先发一个 `StreamUsage`（`TurnUsage` 本轮、`Usage` 累计），工具循环期间即可更新计数；provider 未上报用量时为零值。终态 `StreamFinalOutput.Usage` 仍是整段 run 的累计值。
 - 只在结尾要结果、不在乎过程？`res, err := agent.NewRunner().RunStream(ctx, a, in).Wait()` 一行搞定。
 - 模型没实现流式接口时自动降级为普通调用（全文作为单个 TextDelta），上层代码不用改。
 - 与会话组合：`RunStreamWithSession(ctx, a, sess, input)`，回写发生在终态事件之前，单终态语义不变。

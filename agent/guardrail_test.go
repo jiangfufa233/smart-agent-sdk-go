@@ -346,7 +346,7 @@ func TestStreamOutputGuardrailTripwire(t *testing.T) {
 	a := &Agent{ID: "a", Name: "a", Model: m, OutputGuardrails: []OutputGuardrail{tripOutput("leak")}}
 	run := NewRunner().RunStream(context.Background(), a, "x")
 	types := collectStreamTypes(t, run)
-	want := []StreamEventType{StreamRunStarted, StreamTextDelta, StreamTextDelta, StreamRunError}
+	want := []StreamEventType{StreamRunStarted, StreamTextDelta, StreamTextDelta, StreamUsage, StreamRunError}
 	if strings.Join(stringify(types), ",") != strings.Join(stringify(want), ",") {
 		t.Fatalf("events = %v, want %v", types, want)
 	}

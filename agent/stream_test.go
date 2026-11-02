@@ -47,9 +47,12 @@ func TestRunStreamFallbackNonStreaming(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	requireTypes(t, evs,
-		StreamRunStarted, StreamTextDelta, StreamFinalOutput)
-	if evs[1].Text != "hello" || evs[2].Text != "hello" {
-		t.Fatalf("text events = %q / %q", evs[1].Text, evs[2].Text)
+		StreamRunStarted, StreamTextDelta, StreamUsage, StreamFinalOutput)
+	if evs[1].Text != "hello" || evs[3].Text != "hello" {
+		t.Fatalf("text events = %q / %q", evs[1].Text, evs[3].Text)
+	}
+	if evs[2].TurnUsage != (model.Usage{}) || evs[2].Usage != (model.Usage{}) {
+		t.Fatalf("fallback usage event = %+v, want zero usage", evs[2])
 	}
 	if res.Output != "hello" || res.RunID == "" || res.Duration <= 0 {
 		t.Fatalf("result = %+v", res)
@@ -72,11 +75,14 @@ func TestRunStreamTextDeltas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	requireTypes(t, evs, StreamRunStarted, StreamTextDelta, StreamTextDelta, StreamFinalOutput)
+	requireTypes(t, evs, StreamRunStarted, StreamTextDelta, StreamTextDelta, StreamUsage, StreamFinalOutput)
 	if evs[1].Text != "Hel" || evs[2].Text != "lo" {
 		t.Fatalf("deltas = %q %q", evs[1].Text, evs[2].Text)
 	}
-	fin := evs[3]
+	if evs[3].TurnUsage.TotalTokens != 12 || evs[3].Usage.TotalTokens != 12 {
+		t.Fatalf("usage event = %+v", evs[3])
+	}
+	fin := evs[4]
 	if fin.Text != "Hello" || fin.FinishReason != "stop" || fin.Usage.TotalTokens != 12 {
 		t.Fatalf("final = %+v", fin)
 	}
@@ -97,7 +103,7 @@ func TestRunStreamReasoningIsObservableOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	requireTypes(t, evs, StreamRunStarted, StreamReasoningDelta, StreamTextDelta, StreamFinalOutput)
+	requireTypes(t, evs, StreamRunStarted, StreamReasoningDelta, StreamTextDelta, StreamUsage, StreamFinalOutput)
 	if evs[1].Reasoning != "considering" || evs[1].Text != "" {
 		t.Fatalf("reasoning event = %+v", evs[1])
 	}
@@ -141,8 +147,9 @@ func TestRunStreamToolLoop(t *testing.T) {
 	requireTypes(t, evs,
 		StreamRunStarted,
 		StreamToolCallStarted, StreamToolCallArgs, StreamToolCallArgs, StreamToolCallFinished,
+		StreamUsage,
 		StreamToolResult,
-		StreamTextDelta, StreamFinalOutput)
+		StreamTextDelta, StreamUsage, StreamFinalOutput)
 
 	if evs[1].Call.ID != "c1" || evs[1].Call.Function.Name != "get_weather" {
 		t.Errorf("started = %+v", evs[1].Call)
@@ -153,8 +160,16 @@ func TestRunStreamToolLoop(t *testing.T) {
 	if evs[4].Call.Function.Arguments != `{"city":"Beijing"}` {
 		t.Errorf("finished = %+v", evs[4].Call)
 	}
-	if evs[5].Call.ID != "c1" || evs[5].ToolErr != nil || evs[5].Result != `{"temp_c":21}` {
-		t.Errorf("result = %+v", evs[5])
+	// Per-call usage is published before the tools run, and cumulative usage
+	// advances once the final answer arrives.
+	if evs[5].Turn != 0 || evs[5].TurnUsage.TotalTokens != 15 || evs[5].Usage.TotalTokens != 15 {
+		t.Errorf("first usage event = %+v", evs[5])
+	}
+	if evs[6].Call.ID != "c1" || evs[6].ToolErr != nil || evs[6].Result != `{"temp_c":21}` {
+		t.Errorf("result = %+v", evs[6])
+	}
+	if evs[8].Turn != 1 || evs[8].TurnUsage.TotalTokens != 32 || evs[8].Usage.TotalTokens != 47 {
+		t.Errorf("second usage event = %+v", evs[8])
 	}
 	if gotArgs != "Beijing" {
 		t.Errorf("tool got city %q, want Beijing", gotArgs)
@@ -193,9 +208,9 @@ func TestRunStreamToolErrorParity(t *testing.T) {
 	}
 	requireTypes(t, evs,
 		StreamRunStarted, StreamToolCallStarted, StreamToolCallArgs, StreamToolCallFinished,
-		StreamToolResult, StreamFinalOutput)
-	if evs[4].ToolErr == nil || evs[4].ToolErr.Tool != "boom" {
-		t.Fatalf("tool result event = %+v", evs[4])
+		StreamUsage, StreamToolResult, StreamUsage, StreamFinalOutput)
+	if evs[5].ToolErr == nil || evs[5].ToolErr.Tool != "boom" {
+		t.Fatalf("tool result event = %+v", evs[5])
 	}
 	if len(res.ToolErrors) != 1 {
 		t.Fatalf("ToolErrors = %+v", res.ToolErrors)
@@ -240,7 +255,7 @@ func TestRunStreamApprovalDenialLetsManagerRecover(t *testing.T) {
 	}
 	requireTypes(t, evs,
 		StreamRunStarted, StreamToolCallStarted, StreamToolCallArgs, StreamToolCallFinished,
-		StreamToolResult, StreamTextDelta, StreamFinalOutput)
+		StreamUsage, StreamToolResult, StreamTextDelta, StreamUsage, StreamFinalOutput)
 	if executed {
 		t.Fatal("denied tool executed")
 	}
@@ -251,8 +266,8 @@ func TestRunStreamApprovalDenialLetsManagerRecover(t *testing.T) {
 	if !errors.As(res.ToolErrors[0], &authErr) || authErr.Tool != "restricted" {
 		t.Fatalf("tool error = %v, want restricted AuthorizationError", res.ToolErrors[0])
 	}
-	if evs[4].ToolErr == nil || !errors.As(evs[4].ToolErr, &authErr) {
-		t.Fatalf("tool result event = %+v", evs[4])
+	if evs[5].ToolErr == nil || !errors.As(evs[5].ToolErr, &authErr) {
+		t.Fatalf("tool result event = %+v", evs[5])
 	}
 	request := managerModel.LastRequest()
 	if request == nil || len(request.Messages) == 0 || !strings.Contains(request.Messages[len(request.Messages)-1].Content, "human approval denied") {

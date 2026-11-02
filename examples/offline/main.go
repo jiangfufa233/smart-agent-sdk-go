@@ -151,6 +151,8 @@ func main() {
 		switch ev.Type {
 		case agent.StreamTextDelta:
 			fmt.Print(ev.Text)
+		case agent.StreamUsage:
+			fmt.Printf("\nstream> usage: turn=%d turn_tokens=%d total_tokens=%d\n", ev.Turn, ev.TurnUsage.TotalTokens, ev.Usage.TotalTokens)
 		case agent.StreamFinalOutput:
 			fmt.Printf("\nstream> done, finish=%s, usage=%d tokens\n", ev.FinishReason, ev.Usage.TotalTokens)
 		case agent.StreamRunError:

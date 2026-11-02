@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-11-02
+
+### Added
+
+- `agent.StreamUsage` stream event: the runner publishes provider-reported
+  token usage after every model call instead of only on the final output.
+  Each event carries `TurnUsage` (the call that just finished) and `Usage`
+  (cumulative for the run), so event-driven clients can update meters,
+  budgets and UI counters while multi-turn tool loops are still running.
+  `StreamFinalOutput.Usage` remains the cumulative run total. Providers that
+  do not report usage yield zero values.
+
 ## [2.1.0] - 2026-11-02
 
 ### Added

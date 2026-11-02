@@ -320,8 +320,9 @@ func TestStreamHandoff(t *testing.T) {
 	want := []StreamEventType{
 		StreamRunStarted,
 		StreamToolCallStarted, StreamToolCallArgs, StreamToolCallFinished,
+		StreamUsage,
 		StreamToolResult, StreamHandoff,
-		StreamTextDelta, StreamFinalOutput,
+		StreamTextDelta, StreamUsage, StreamFinalOutput,
 	}
 	if strings.Join(toStrings(types), ",") != strings.Join(toStrings(want), ",") {
 		t.Fatalf("events = %v, want %v", types, want)

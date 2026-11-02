@@ -284,7 +284,10 @@ for ev := range run.Events {
         fmt.Printf("\n[handoff %s -> %s]\n", ev.From.Name, ev.To.Name)
     case agent.StreamTaskStarted, agent.StreamTaskCompleted, agent.StreamTaskFailed:
         // isolated child task lifecycle; use ev.Agent / ev.Task for UI correlation
-    case agent.StreamFinalOutput: // terminal: full text + usage
+    case agent.StreamUsage:
+        // published after every model call: ev.TurnUsage is this call, ev.Usage is cumulative
+        fmt.Printf("\n[turn %d tokens, total %d]", ev.TurnUsage.TotalTokens, ev.Usage.TotalTokens)
+    case agent.StreamFinalOutput: // terminal: full text + cumulative usage
         fmt.Printf("\n[done, %d tokens]\n", ev.Usage.TotalTokens)
     case agent.StreamRunError: // terminal: failure
         log.Printf("run failed: %v", ev.Err)
@@ -293,10 +296,11 @@ for ev := range run.Events {
 res, err := run.Result()
 ```
 
-Full event set: `StreamRunStarted` / `StreamTaskStarted` / `StreamTextDelta` / `StreamReasoningDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamToolResult` / `StreamHandoff` / `StreamTaskCompleted` / `StreamTaskFailed` / `StreamTaskSkipped` / `StreamFinalOutput` / `StreamRunError`.
+Full event set: `StreamRunStarted` / `StreamTaskStarted` / `StreamTextDelta` / `StreamReasoningDelta` / `StreamToolCallStarted` / `StreamToolCallArgs` / `StreamToolCallFinished` / `StreamUsage` / `StreamToolResult` / `StreamHandoff` / `StreamTaskCompleted` / `StreamTaskFailed` / `StreamTaskSkipped` / `StreamFinalOutput` / `StreamRunError`.
 
 **Key points**:
 - **Exactly one terminal event**: `StreamFinalOutput` or `StreamRunError`, followed by channel close. Two correct consumption patterns: range until close, or `run.Wait()` (drains and returns the result).
+- **Live usage feedback**: every model call ends with a `StreamUsage` event (`TurnUsage` for that call, `Usage` cumulative), so meters and budgets can update during multi-turn tool loops; values are zero when the provider omits usage. `StreamFinalOutput.Usage` remains the cumulative run total.
 - Only want the outcome? `res, err := agent.NewRunner().RunStream(ctx, a, in).Wait()` — one line.
 - If the model doesn't implement streaming, the run automatically degrades to a plain call (the full answer arrives as a single TextDelta); your code doesn't change.
 - Combine with sessions: `RunStreamWithSession(ctx, a, sess, input)`; the write-back happens before the terminal event, so the single-terminal invariant holds.

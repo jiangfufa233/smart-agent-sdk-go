@@ -20,6 +20,7 @@ const (
 	StreamToolCallStarted  StreamEventType = "tool_call_started"
 	StreamToolCallArgs     StreamEventType = "tool_call_args"
 	StreamToolCallFinished StreamEventType = "tool_call_finished"
+	StreamUsage            StreamEventType = "usage"
 	StreamToolResult       StreamEventType = "tool_result"
 	StreamHandoff          StreamEventType = "handoff"
 	StreamTaskCompleted    StreamEventType = "task_completed"
@@ -94,8 +95,12 @@ type StreamEvent struct {
 	// FinishReason is reported on StreamFinalOutput.
 	FinishReason string
 	// Usage is the accumulated provider-reported run usage, reported on
-	// StreamFinalOutput.
+	// StreamUsage (cumulative through the current turn) and StreamFinalOutput.
 	Usage model.Usage
+	// TurnUsage is the provider-reported usage of the model call that
+	// produced the event, reported on StreamUsage. Providers that do not
+	// report usage yield the zero value.
+	TurnUsage model.Usage
 	// Err is the terminal failure (StreamRunError) or task failure detail.
 	Err error
 }
@@ -270,6 +275,14 @@ func (r *Runner) streamLoop(ctx context.Context, a *Agent, history []model.Messa
 			return nil, cur, fmt.Errorf("agent: model call failed: %w", err)
 		}
 		usage.Accumulate(turnUsage)
+		// Publish usage as soon as the provider reports it for this call,
+		// so event-driven clients do not have to wait for the whole run.
+		usageEvent := streamEvent(opts, cur, StreamUsage, turn)
+		usageEvent.TurnUsage = turnUsage
+		usageEvent.Usage = usage
+		if !sendEvent(ctx, ch, usageEvent) {
+			return nil, cur, ctx.Err()
+		}
 
 		if len(msg.ToolCalls) == 0 {
 			msgs = append(msgs, msg)
